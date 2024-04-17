@@ -13,7 +13,10 @@
 
 // WiFi credentials
 #define WIFI_CFG    "/wifi.cfg"
-#define HOSTNAME    "/hostname"
+#define HOSTNAME    "/hostname.cfg"
+
+// Mime types
+#define MIMETYPE    "/mimetype.cfg"
 
 // TCP port
 #define PORT        (1965)
@@ -63,12 +66,12 @@ BearSSL::WiFiServerSecure server(PORT);
 BearSSL::X509List         *srvCert;
 BearSSL::PrivateKey       *srvKey;
 // #define USE_EC       // Enable Elliptic Curve signed cert
-//#define CACHE_SIZE 5  // Number of sessions to cache.
-//#define USE_CACHE     // Enable SSL session caching.
+#define CACHE_SIZE 5  // Number of sessions to cache.
+#define USE_CACHE     // Enable SSL session caching.
 // Caching SSL sessions shortens the length of the SSL handshake.
 // You can see the performance improvement by looking at the
 // Network tab of the developer tools of your browser.
-// #define DYNAMIC_CACHE // Whether to dynamically allocate the cache.
+//#define DYNAMIC_CACHE // Whether to dynamically allocate the cache.
 
 #if defined(USE_CACHE) && defined(DYNAMIC_CACHE)
 // Dynamically allocated cache.
@@ -92,10 +95,60 @@ char *ssid;
 char *pass;
 char buf[1025];
 
+// Read one line from stream, delimited by the specified char,
+// with maximum of specified lenght, and return the lenght read string
+int readln(Stream *stream, char *buf, int maxLen = 1024, char del = '\r') {
+  int len = 0;
+  char c;
+  while (stream->available()) {
+    // Read one char
+    c = stream->read();
+    // Line must start with a non-control character
+    if (len == 0 and c < 32) continue;
+    // Limit line length
+    if (len > maxLen - 1) {
+      len = 0;
+      break;
+    }
+    buf[len++] = c;
+    // Break on reading delimiter or no char available
+    if (c == del or c == 255) break;
+  }
+  // Ensure a zero-terminated string
+  buf[len] = '\0';
+  // Return the lenght
+  return len;
+}
+
+// Read one line from file, delimited by the specified char,
+// with maximum of specified lenght, and return the lenght read string
+int readln(File *file, char *buf, int maxLen = 1024) {
+  int len = 0;
+  char c;
+  while (file->available()) {
+    // Read one char
+    c = file->read();
+    // Line must start with a non-control character
+    if (len == 0 and c < 32) continue;
+    // Limit line length
+    if (len > maxLen - 1) {
+      len = -1;
+      break;
+    }
+    buf[len++] = c;
+    // Break on reading delimiter or no char available
+    if (c == '\r' or c == '\n' or c == '\0') break;
+  }
+  // Ensure a zero-terminated string
+  buf[len] = '\0';
+  // Return the lenght
+  return len;
+}
+
 // Load the certificate and the key from storage
 void loadCertKey() {
   File file;
-  Serial.print(F("SYS: Reading certificate from ")); Serial.print(SSL_CERT); Serial.print(F(" ... "));
+  Serial.print(F("SYS: Reading SSL certificate from ")); Serial.print(SSL_CERT); Serial.print(F(" ... "));
   file = SD.open(SSL_CERT, "r");
   if (file.isFile()) {
     Serial.println();
@@ -104,7 +157,7 @@ void loadCertKey() {
   else
     Serial.println(F("ERROR"));
   file.close();
-  Serial.print(F("SYS: Reading key from ")); Serial.print(SSL_KEY); Serial.print(F(" ... "));
+  Serial.print(F("SYS: Reading SSL key from ")); Serial.print(SSL_KEY); Serial.print(F(" ... "));
   file = SD.open(SSL_KEY, "r");
   if (file.isFile()) {
     Serial.println();
@@ -115,15 +168,12 @@ void loadCertKey() {
   file.close();
 }
 
-// Load WiFi configuration
-void initWiFi() {
-  int  len = 0xFF;
-  File file;
-
-  WiFi.mode(WIFI_STA);
+// Load hostname configuration
+void initHostname() {
+  int len = 1024;
   // Read the host name
   Serial.print(F("SYS: Reading host name from ")); Serial.print(HOSTNAME); Serial.print(F(" ... "));
-  file = SD.open(HOSTNAME, "r");
+  File file = SD.open(HOSTNAME, "r");
   if (file.isFile()) {
     len = file.read((uint8_t*)buf, 255);
     char *token = strtok(buf, "\t\r\n");
@@ -137,39 +187,60 @@ void initWiFi() {
   else
     Serial.println(F("ERROR"));
   file.close();
+}
 
+// Load WiFi configuration
+void initWiFi() {
+  int len = 1024;
   // Read the WiFi configuration
-  Serial.print(F("SYS: Reading WiFi configuration from ")); Serial.print(WIFI_CFG); Serial.print(F(" ... "));
-  file = SD.open(WIFI_CFG, "r");
+  Serial.print(F("WFI: Reading WiFi configuration from ")); Serial.print(WIFI_CFG); Serial.print(F(" ... "));
+  File file = SD.open(WIFI_CFG, "r");
   if (file.isFile()) {
-    while (true) {
-      yield();
-      int i = 0;
-      char c;
-      while (c = file.read()) {
-        // SSID must start with a character
-        if (i == 0 and c < 32) continue;
-        // Limit line length
-        if (i >= 255) break;
-        buf[i++] = c;
-        // Break on reading newline or no char available
-        if (c == '\r' or c == '\n' or c == 255) break;
-      }
-      // Break on no char available
-      if (c == 255) break;
-      buf[i] = '\0';
+    while (len > 0) {
+      // Read one line from file
+      len = readln(&file, buf, 256);
       // Skip over comment lines
       if (buf[0] == '#') continue;
-      // Find the SSID and the PSK, TAB-separated
+      // Find the SSID and the PASS, TAB-separated
       ssid = strtok((char*)buf, "\t");
       pass = strtok(NULL, "\r\n\t");
       // Add SSID and PASS to WiFi Multi
       if (ssid != NULL and pass != NULL) {
-        Serial.println(); Serial.print(F("SYS: Add '")); Serial.print(ssid); Serial.print(F("' "));
+        Serial.println(); Serial.print(F("WFI: Add '")); Serial.print(ssid); Serial.print(F("' "));
 #ifdef DEBUG
         Serial.print(F("with pass '")); Serial.print(pass); Serial.print(F("' "));
 #endif
         wifiMulti.addAP(ssid, pass);
+      }
+    }
+    Serial.println();
+  }
+  else
+    Serial.println(F("ERROR"));
+  file.close();
+}
+
+// Load mime-types
+void initMimeType() {
+  int len = 1024;
+  char *ext;
+  char *mime;
+
+  // Read the mime-type definitions
+  Serial.print(F("MIM: Reading mime-types from ")); Serial.print(MIMETYPE); Serial.print(F(" ... "));
+  File file = SD.open(MIMETYPE, "r");
+  if (file.isFile()) {
+    while (len > 0) {
+      // Read one line from file
+      len = readln(&file, buf, 256);
+      // Skip over comment lines
+      if (buf[0] == '#') continue;
+      // Find the extension and the mime type, TAB-separated
+      ext = strtok((char*)buf, "\t");
+      mime = strtok(NULL, "\r\n\t");
+      if (ext != NULL and mime != NULL) {
+        Serial.println(); Serial.print(F("MIM: Add '")); Serial.print(ext); Serial.print(F("' "));
+        Serial.print(F("mime/type '")); Serial.print(mime); Serial.print(F("' "));
       }
     }
     Serial.println();
@@ -208,7 +279,7 @@ void setClock() {
 }
 
 
-void handleClient(WiFiClient *client) {
+void handleClient(WiFiClient * client) {
   client->println("2 text/plain; charset=utf-8");
   client->println("Hi, Bob!");
   client->flush();
@@ -216,32 +287,8 @@ void handleClient(WiFiClient *client) {
 }
 
 
-// Read one line from stream, delimited by the specified char,
-// with maximum of specified lenght, and return the lenght read string
-int readln(Stream *client, char *buf, int maxLen = 1024, char del = '\r') {
-  int len = 0;
-  char c;
-  while (client->available()) {
-    // Read one char
-    c = client->read();
-    // Line must start with a non-control character
-    if (len == 0 and c < 32) continue;
-    // Limit line length
-    if (len >= 1023) {
-      len = 0;
-      break;
-    }
-    buf[len++] = c;
-    // Break on reading delimiter or no char available
-    if (c == del or c == 255) break;
-  }
-  // Ensure a zero-terminated string
-  buf[len] = '\0';
-  // Return the lenght
-  return len;
-}
 
-void sendFile(Stream *client, char *pHost, char *pPath, char *pExt, const char *pFile) {
+void sendFile(Stream * client, char *pHost, char *pPath, char *pExt, const char *pFile) {
 
   // Validate the path (../../ ...)
 
@@ -333,7 +380,7 @@ void sendFile(Stream *client, char *pHost, char *pPath, char *pExt, const char *
 }
 
 // Handle Gemini protocol
-void handleClient(BearSSL::WiFiClientSecure *client) {
+void handleClient(BearSSL::WiFiClientSecure * client) {
   char *rsp = (char*)HEADER_INVALID_URL;
   client->setTimeout(5000);
   while (client->connected()) {
@@ -410,7 +457,7 @@ void handleClient(BearSSL::WiFiClientSecure *client) {
 }
 
 // Handle Spartan protocol
-void clSpartan(WiFiClient *client) {
+void clSpartan(WiFiClient * client) {
   // Read one line from request
   int len = readln(client, buf);
   if (len) {
@@ -488,14 +535,10 @@ void setup() {
     while (true) {
       yield();
       // Flash the led
-      digitalWrite(LED, HIGH ^ LEDinv);
-      delay(50);
-      digitalWrite(LED, LOW ^ LEDinv);
-      delay(50);
-      digitalWrite(LED, HIGH ^ LEDinv);
-      delay(50);
-      digitalWrite(LED, LOW ^ LEDinv);
-      delay(250);
+      digitalWrite(LED, HIGH ^ LEDinv); delay(50);
+      digitalWrite(LED, LOW  ^ LEDinv); delay(50);
+      digitalWrite(LED, HIGH ^ LEDinv); delay(50);
+      digitalWrite(LED, LOW  ^ LEDinv); delay(250);
     }
   }
   else {
@@ -510,9 +553,12 @@ void setup() {
     //SD.setTimeCallback(timeCallback);
   }
 
-  // Connect to WiFi
+  // Set hostname
+  initHostname();
+  // Configure WiFi
   initWiFi();
-
+  // Load the mime-types
+  initMimeType();
   // Configure secure server
   loadCertKey();
 #ifndef USE_EC
@@ -541,11 +587,8 @@ void setup() {
     }
   */
 
-
   srvHTTP.on("/", handleHTTPRoot);
   //server.onNotFound(handleNotFound);
-
-
 }
 
 // Main Arduino loop
@@ -554,8 +597,7 @@ void loop() {
   if (wifiMulti.run(5000) == WL_CONNECTED) {
     if (reconn) {
       // Connected
-      Serial.println(F("SYS: WiFi connected"));
-      Serial.print(F("SYS: SSID: "));
+      Serial.print(F("SYS: WiFi connected: "));
       Serial.println(WiFi.SSID());
       Serial.print(F("NET: IP address: "));
       Serial.println(WiFi.localIP());
@@ -576,12 +618,12 @@ void loop() {
 
       // Start accepting connections
       server.begin();
-      Serial.print(F("GMD: Gemini server '")); Serial.print(host); Serial.print(F(".local' started on ")); Serial.print(WiFi.localIP()); Serial.print(": "); Serial.println(PORT);
+      Serial.print(F("GMD: Gemini server '")); Serial.print(host); Serial.print(F(".local' started on ")); Serial.print(WiFi.localIP()); Serial.print(":"); Serial.println(PORT);
       srvHTTP.begin();
       Serial.println("HTTP server started");
 
       srvSpartan.begin();
-      Serial.print(F("SPN: Spartan server '")); Serial.print(host); Serial.print(F(".local' started on ")); Serial.print(WiFi.localIP()); Serial.print(": "); Serial.println(300);
+      Serial.print(F("SPN: Spartan server '")); Serial.print(host); Serial.print(F(".local' started on ")); Serial.print(WiFi.localIP()); Serial.print(":"); Serial.println(300);
       srvGopher.begin();
 
       reconn = false;
