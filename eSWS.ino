@@ -48,6 +48,9 @@
 // WiFi multiple access points
 ESP8266WiFiMulti wifiMulti;
 
+// Protocols
+enum proto_t {GEMINI, SPARTAN, GOPHER, HTTP};
+
 // response headers
 static const char *HEADER_GEM_OK            = "20 text/gemini\r\n";                 // .gmi
 static const char *HEADER_MARKDOWN_OK       = "20 text/markdown\r\n";               // .md
@@ -103,8 +106,6 @@ int readln(Stream *stream, char *buf, int maxLen = 1024, char del = '\r') {
   while (stream->available()) {
     // Read one char
     c = stream->read();
-    // Line must start with a non-control character
-    if (len == 0 and c < 32) continue;
     // Limit line length
     if (len > maxLen - 1) {
       len = 0;
@@ -279,29 +280,24 @@ void setClock() {
 }
 
 
-void handleClient(WiFiClient * client) {
-  client->println("2 text/plain; charset=utf-8");
-  client->println("Hi, Bob!");
-  client->flush();
-  client->stop();
-}
 
-
-
-void sendFile(Stream * client, char *pHost, char *pPath, char *pExt, const char *pFile) {
-
+void sendFile(Stream *client, int proto, char *pHost, char *pPath, char *pExt, const char *pFile) {
+  int dirEnd = 0;
   // Validate the path (../../ ...)
 
   // Virtual hosting
   int hostLen = strlen(host);
   // Find the longest host name
-  if (hostLen < strlen(pHost))
-    hostLen = strlen(pHost);
+  if (pHost != NULL)
+    if (hostLen < strlen(pHost))
+      hostLen = strlen(pHost);
   // Dinamically create the file path ("/" + host + path (+ "index.gmi"))
   char *filePath = new char[strlen(pPath) + hostLen + 20];
   strcpy(filePath, "/");
   // Check if the hostname and request host are the same and append the host
-  if (strncmp(host, pHost, strlen(host)) == 0 and strncmp(&pHost[strlen(host)], ".local", 6) == 0)
+  if (pHost == NULL)
+    strcat(filePath, host);
+  else if (strncmp(host, pHost, strlen(host)) == 0 and strncmp(&pHost[strlen(host)], ".local", 6) == 0)
     strcat(filePath, host);
   else {
     strcat(filePath, pHost);
@@ -317,18 +313,19 @@ void sendFile(Stream * client, char *pHost, char *pPath, char *pExt, const char 
   // Append the path
   strcat(filePath, pPath);
 
-  Serial.print(F("DBG: File path: "));
-  Serial.println(filePath);
-
   // Check if directory and append default file name for protocol
   File file = SD.open(filePath, "r");
   if (file.isDirectory()) {
     file.close();
     if (filePath[strlen(filePath) - 1] != '/')
       strcat(filePath, "/");
+    dirEnd = strlen(filePath);
     strcat(filePath, pFile);
     file = SD.open(filePath, "r");
   };
+
+  Serial.print(F("DBG: File path: "));
+  Serial.println(filePath);
 
   // Check if the file exists
   if (file.isFile()) {
@@ -361,6 +358,68 @@ void sendFile(Stream * client, char *pHost, char *pPath, char *pExt, const char 
     }
     file.close();
   }
+  else if (dirEnd > 0) {
+    // The request was for a directory and there is no directory index.
+    // Create a file listing/
+    // Restore the directory path
+    filePath[dirEnd] = '\0';
+    // Send the response
+    switch (proto) {
+      case GOPHER:
+        client->print("iContent of ");
+        client->print(pPath);
+        client->print("\t\tnull\t1\r\n");
+        client->print("i\t\tnull\t1\r\n");
+        break;
+      case SPARTAN:
+        client->print("2 text/gemini\r\n");
+        client->print("# Content of ");
+        client->print(pPath);
+        client->print("\r\n\r\n");
+        break;
+      case HTTP:
+        break;
+      default:
+        client->print(HEADER_GEM_OK);
+        client->print("# Content of ");
+        client->print(pPath);
+        client->print("\r\n\r\n");
+    }
+    // List files in SD
+    File root = SD.open(filePath);
+    while (File entry = root.openNextFile()) {
+      // Hidden files
+      if (entry.name()[0] == '.') continue;
+      switch (proto) {
+        case GOPHER:
+          if (entry.isDirectory())
+            client->print("1");
+          else
+            client->print("0");
+          client->print(entry.name());
+          client->print("\t");
+          client->print(pPath);
+          client->print(entry.name());
+          client->print("\tgemini.local\t70\r\n");
+          //client->print("\r\n");
+          break;
+        case HTTP:
+          break;
+        case SPARTAN:
+        default:
+          client->print("=> ");
+          client->print(pPath);
+          if (pPath[strlen(pPath) - 1] != '/')
+            client->print("/");
+          client->print(entry.name());
+          client->print("\t");
+          client->print(entry.name());
+          if (entry.isDirectory())
+            client->print("/");
+          client->print("\r\n");
+      }
+    }
+  }
   else if (strcmp(pPath, "/status.gmi") == 0) {
     client->print(HEADER_GEM_OK);
     client->print("# Server status\n");
@@ -381,131 +440,172 @@ void sendFile(Stream * client, char *pHost, char *pPath, char *pExt, const char 
 
 // Handle Gemini protocol
 void handleClient(BearSSL::WiFiClientSecure * client) {
+  char *pSchema, *pHost, *pPort, *pPath, *pExt, *pQuery, *pEOL;
   char *rsp = (char*)HEADER_INVALID_URL;
   client->setTimeout(5000);
   while (client->connected()) {
     // Read one line from request
     int len = readln(client, buf);
     // Check the length
-    if (len) {
-      Serial.print(F("GMD: Request ("));
-      Serial.print(len);
-      Serial.print(" bytes) '");
-      Serial.print(buf);
-      Serial.println("'");
+    if (len == 0) continue;
 
-      char *pSchema, *pHost, *pPort, *pPath, *pExt, *pQuery, *pEOL;
+    Serial.print(F("GMI: Request ("));
+    Serial.print(len);
+    Serial.print(" bytes) '");
+    Serial.print(buf);
+    Serial.println("'");
 
-      // Find CRLF as EOL
-      pEOL = strchr(buf, '\r');
-      if (pEOL == NULL) return;
-      pEOL[0] = '\0';
 
-      // Find the schema
-      if (strncmp(buf, "gemini://", 9) == 0) {
-        Serial.println(buf);
-        pSchema = buf;
-        pSchema[6] = '\0';
-        pHost = pSchema + 7;
-        // Move the host down 2 chars
-        int i;
-        for (i = 0; pHost[i + 2] != '/' and pHost[i + 2] != '?' and pHost[i + 2] != '\0'; i++)
-          pHost[i] = pHost[i + 2];
-        pHost[i] = '\0';
-        // Find the requested path
-        if (pHost[i + 2] == '/') {
-          pPath = &pHost[i + 2];
-          pHost[i + 1] = '\0';
-        }
-        else  {
-          pPath = &pHost[i + 1];
-          pPath[0] = '/';
-        }
+    // Find CRLF as EOL
+    pEOL = strchr(buf, '\r');
+    if (pEOL == NULL) return;
+    pEOL[0] = '\0';
 
-        // Find the port, if any
-        pPort = strchr(pHost, ':');
-        if (pPort == NULL)
-          pPort = pEOL;
-        else {
-          pPort[0] = '\0';
-          pPort++;
-        }
-        // Find the query
-        pQuery = strchr(pPath, '?');
-        if (pQuery != NULL) {
-          pQuery[0] = '\0';
-          pQuery++;
-        }
-        else
-          pQuery = pEOL;
-
-        Serial.print(F("Schema: ")); Serial.println(pSchema);
-        Serial.print(F("Host: ")); Serial.println(pHost);
-        Serial.print(F("Port: ")); Serial.println(pPort);
-        Serial.print(F("Path: ")); Serial.println(pPath);
-        Serial.print(F("Query: ")); Serial.println(pQuery);
-
-        sendFile(client, pHost, pPath, pExt, "index.gmi");
+    // Find the schema
+    if (strncmp(buf, "gemini://", 9) == 0) {
+      pSchema = buf;
+      pSchema[6] = '\0';
+      pHost = pSchema + 7;
+      // Move the host down 2 chars
+      int i;
+      for (i = 0; pHost[i + 2] != '/' and pHost[i + 2] != '?' and pHost[i + 2] != '\0'; i++)
+        pHost[i] = pHost[i + 2];
+      pHost[i] = '\0';
+      // Find the requested path
+      if (pHost[i + 2] == '/') {
+        pPath = &pHost[i + 2];
+        pHost[i + 1] = '\0';
+      }
+      else  {
+        pPath = &pHost[i + 1];
+        pPath[0] = '/';
+      }
+      // Find the port, if any
+      pPort = strchr(pHost, ':');
+      if (pPort == NULL)
+        pPort = pEOL;
+      else {
+        pPort[0] = '\0';
+        pPort++;
+      }
+      // Find the query
+      pQuery = strchr(pPath, '?');
+      if (pQuery != NULL) {
+        pQuery[0] = '\0';
+        pQuery++;
       }
       else
-        client->print(HEADER_INVALID_URL);
+        pQuery = pEOL;
 
-      client->flush();
-      client->stop();
+      Serial.print(F("Schema: ")); Serial.println(pSchema);
+      Serial.print(F("Host:   ")); Serial.println(pHost);
+      Serial.print(F("Port:   ")); Serial.println(pPort);
+      Serial.print(F("Path:   ")); Serial.println(pPath);
+      Serial.print(F("Query:  ")); Serial.println(pQuery);
+
+      // Send the requested file or the generated response
+      sendFile(client, GEMINI, pHost, pPath, pExt, "index.gmi");
     }
+    else
+      client->print(HEADER_INVALID_URL);
+
+    client->flush();
+    client->stop();
   }
 }
 
 // Handle Spartan protocol
 void clSpartan(WiFiClient * client) {
-  // Read one line from request
-  int len = readln(client, buf);
-  if (len) {
+  char *pHost, *pPath, *pExt, *pQuery, *pLen, *pEOL;
+  long int lQuery;
+  client->setTimeout(5000);
+  while (client->connected()) {
+    // Read one line from request
+    int len = readln(client, buf);
+    // Check the length
+    if (len == 0) continue;
+
     Serial.print(F("SPN: Request ("));
     Serial.print(len);
     Serial.print(" bytes) '");
     Serial.print(buf);
     Serial.println("'");
+
+    // Find CRLF as EOL
+    pEOL = &buf[len];
+
+    // Find the host
+    pHost = buf;
+    // Find the path
+    pPath = strchr(pHost, ' ');
+    if (pPath == NULL)
+      return;
+    else {
+      pPath[0] = '\0';
+      pPath++;
+    }
+    // Find the length
+    pLen = strchr(pPath, ' ');
+    if (pLen == NULL)
+      return;
+    else {
+      pLen[0] = '\0';
+      pLen++;
+      // Convert to long integer
+      lQuery = strtol(pLen, NULL, 10);
+    }
+
+    Serial.print(F("Host: ")); Serial.println(pHost);
+    Serial.print(F("Path: ")); Serial.println(pPath);
+    Serial.print(F("Length: ")); Serial.println(lQuery);
+    Serial.print(F("Query: ")); Serial.println(pQuery);
+
+    // Send the requested file or the generated response
+    sendFile(client, SPARTAN, pHost, pPath, pExt, "index.gmi");
+
+    client->flush();
+    client->stop();
   }
+}
 
-  char *pHost, *pPath, *pExt, *pQuery, *pLen, *pEOL;
-  long int lQuery;
 
-  // Find CRLF as EOL
-  pEOL = &buf[len];
+// Handle Gopher protocol
+void clGopher(WiFiClient * client) {
+  client->setTimeout(5000);
+  while (client->connected()) {
+    // Read one line from request
+    int len = readln(client, buf);
+    if (len) {
+      Serial.print(F("GPH: Request ("));
+      Serial.print(len);
+      Serial.print(" bytes) '");
+      Serial.print(buf);
+      Serial.println("'");
 
-  // Find the host
-  pHost = buf;
-  // Find the path
-  pPath = strchr(pHost, ' ');
-  if (pPath == NULL)
-    return;
-  else {
-    pPath[0] = '\0';
-    pPath++;
+      char *pPath, *pExt, *pQuery, *pEOL;
+
+      // Find CRLF as EOL
+      pEOL = &buf[len];
+
+      // Find the host
+      pPath = buf;
+      // Find the path
+      pQuery = strchr(pPath, '?');
+      if (pQuery != NULL) {
+        pQuery[0] = '\0';
+        pQuery++;
+      }
+
+      if (strlen(pPath) == 1)
+        pPath[0] = '/';
+
+      sendFile(client, GOPHER, NULL, pPath, pExt, "gopher.map");
+      client->print("\r\n.\r\n");
+
+      client->flush();
+      client->stop();
+    }
   }
-  // Find the length
-  pLen = strchr(pPath, ' ');
-  if (pLen == NULL)
-    return;
-  else {
-    pLen[0] = '\0';
-    pLen++;
-    // Convert to long integer
-    lQuery = strtol(pLen, NULL, 10);
-  }
-
-  Serial.print(F("Host: ")); Serial.println(pHost);
-  Serial.print(F("Path: ")); Serial.println(pPath);
-  Serial.print(F("Length: ")); Serial.println(lQuery);
-  Serial.print(F("Query: ")); Serial.println(pQuery);
-
-  client->println("2 text/gemini; charset=utf-8");
-
-  sendFile(client, pHost, pPath, pExt, "index.gmi");
-
-  client->flush();
-  client->stop();
 }
 
 
@@ -571,21 +671,6 @@ void setup() {
   server.setCache(&serverCache);
 #endif
 
-  /*
-    // list files in SD
-    File root = SD.open(" / gemini / ");
-    while (File entry = root.openNextFile()) {
-    Serial.print(entry.name());
-    Serial.print("\t\t");
-    Serial.print(entry.size(), DEC);
-    time_t cr = entry.getCreationTime();
-    time_t lw = entry.getLastWrite();
-    struct tm* tmstruct = localtime(&cr);
-    Serial.printf("\tCREATION: % d - % 02d - % 02d % 02d: % 02d: % 02d", (tmstruct->tm_year) + 1900, (tmstruct->tm_mon) + 1, tmstruct->tm_mday, tmstruct->tm_hour, tmstruct->tm_min, tmstruct->tm_sec);
-    tmstruct = localtime(&lw);
-    Serial.printf("\tLAST WRITE: % d - % 02d - % 02d % 02d: % 02d: % 02d\n", (tmstruct->tm_year) + 1900, (tmstruct->tm_mon) + 1, tmstruct->tm_mday, tmstruct->tm_hour, tmstruct->tm_min, tmstruct->tm_sec);
-    }
-  */
 
   srvHTTP.on("/", handleHTTPRoot);
   //server.onNotFound(handleNotFound);
@@ -618,13 +703,13 @@ void loop() {
 
       // Start accepting connections
       server.begin();
-      Serial.print(F("GMD: Gemini server '")); Serial.print(host); Serial.print(F(".local' started on ")); Serial.print(WiFi.localIP()); Serial.print(":"); Serial.println(PORT);
-      srvHTTP.begin();
-      Serial.println("HTTP server started");
-
+      Serial.print(F("GMI: Gemini server '")); Serial.print(host); Serial.print(F(".local' started on ")); Serial.print(WiFi.localIP()); Serial.print(":"); Serial.println(PORT);
       srvSpartan.begin();
       Serial.print(F("SPN: Spartan server '")); Serial.print(host); Serial.print(F(".local' started on ")); Serial.print(WiFi.localIP()); Serial.print(":"); Serial.println(300);
       srvGopher.begin();
+      Serial.print(F("GPH: Gopher server '")); Serial.print(host); Serial.print(F(".local' started on ")); Serial.print(WiFi.localIP()); Serial.print(":"); Serial.println(70);
+      srvHTTP.begin();
+      Serial.println("HTTP server started");
 
       reconn = false;
     }
@@ -653,7 +738,7 @@ void loop() {
       digitalWrite(LED, LOW ^ LEDinv);
     }
 
-    WiFiClient spartan  = srvSpartan.available();
+    WiFiClient spartan = srvSpartan.available();
     if (spartan) {
       // LED on
       digitalWrite(LED, HIGH ^ LEDinv);
@@ -663,20 +748,19 @@ void loop() {
       digitalWrite(LED, LOW ^ LEDinv);
     }
 
-
-    WiFiClient gopher  = srvGopher.available();
+    WiFiClient gopher = srvGopher.available();
     if (gopher) {
       // LED on
       digitalWrite(LED, HIGH ^ LEDinv);
       // Handle the client
-      handleClient(&gopher);
+      clGopher(&gopher);
       // LED off
       digitalWrite(LED, LOW ^ LEDinv);
     }
 
   }
   else {
-    Serial.println(F("SYS: WiFi disconnected"));
+    Serial.println(F("WFI: WiFi disconnected"));
     MDNS.end();
     server.stop();
     srvHTTP.stop();
