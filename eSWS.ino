@@ -98,6 +98,18 @@ char *ssid;
 char *pass;
 char buf[1025];
 
+// Mime types list
+struct MimeTypeEntry {
+  char *ext;
+  char *typ;
+};
+
+typedef std::vector<MimeTypeEntry> MimeTypeList;
+MimeTypeList mtList;
+
+
+
+
 // Read one line from stream, delimited by the specified char,
 // with maximum of specified lenght, and return the lenght read string
 int readln(Stream *stream, char *buf, int maxLen = 1024, char del = '\r') {
@@ -225,7 +237,7 @@ void initWiFi() {
 void initMimeType() {
   int len = 1024;
   char *ext;
-  char *mime;
+  char *typ;
 
   // Read the mime-type definitions
   Serial.print(F("MIM: Reading mime-types from ")); Serial.print(MIMETYPE); Serial.print(F(" ... "));
@@ -238,10 +250,14 @@ void initMimeType() {
       if (buf[0] == '#') continue;
       // Find the extension and the mime type, TAB-separated
       ext = strtok((char*)buf, "\t");
-      mime = strtok(NULL, "\r\n\t");
-      if (ext != NULL and mime != NULL) {
+      typ = strtok(NULL, "\r\n\t");
+      if (ext != NULL and typ != NULL) {
         Serial.println(); Serial.print(F("MIM: Add '")); Serial.print(ext); Serial.print(F("' "));
-        Serial.print(F("mime/type '")); Serial.print(mime); Serial.print(F("' "));
+        Serial.print(F("mime-type '")); Serial.print(typ); Serial.print(F("' "));
+        MimeTypeEntry mtNew;
+        mtNew.ext = strdup(ext);
+        mtNew.typ = strdup(typ);
+        mtList.push_back(mtNew);
       }
     }
     Serial.println();
@@ -335,22 +351,27 @@ void sendFile(Stream *client, int proto, char *pHost, char *pPath, char *pExt, c
       client->print(HEADER_BIN_OK);
     else {
       pExt++;
-      if (strcmp(pExt, "gmi") == 0)
-        client->print(HEADER_GEM_OK);
-      else if (strcmp(pExt, "txt") == 0)
-        client->print(HEADER_PLAIN_OK);
-      else if (strcmp(pExt, "md") == 0)
-        client->print(HEADER_MARKDOWN_OK);
-      else if (strcmp(pExt, "jpg") == 0 or strcmp(pExt, "jpeg") == 0)
-        client->print(HEADER_JPEG_OK);
-      else if (strcmp(pExt, "htm") == 0 or strcmp(pExt, "html") == 0)
-        client->print(HEADER_HTML_OK);
-      else if (strcmp(pExt, "png") == 0)
-        client->print(HEADER_PNG_OK);
-      else
-        client->print(HEADER_BIN_OK);
+      // Find the mime type
+      char *mimetype = NULL;
+      for (auto entry : mtList) {
+        if (strncmp(entry.ext, pExt, 3) == 0) {
+          mimetype = entry.typ;
+          break;
+        }
+      }
+      // TODO Add gopher and http
+      if (proto == GEMINI)
+        client->print("20 ");
+      else if (proto == SPARTAN)
+        client->print("2 ");
+      if (mimetype == NULL)
+        client->print("application/octet-stream\r\n");
+      else {
+        client->print(mimetype);
+        client->print(" \r\n");
+      }
     }
-    //Send content
+    // Send content
     uint8_t fileBuf[512];
     while (file.available()) {
       int len = file.read(fileBuf, 512);
