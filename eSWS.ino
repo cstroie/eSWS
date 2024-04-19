@@ -14,6 +14,7 @@
 // WiFi credentials
 #define WIFI_CFG    "/wifi.cfg"
 #define HOSTNAME    "/hostname.cfg"
+#define DDNS_TOK     "/duckdns.cfg"
 
 // Mime types
 #define MIMETYPE    "/mimetype.cfg"
@@ -38,15 +39,19 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266WiFiMulti.h>
 #include <ESP8266WebServer.h>
+#include <ESP8266HTTPClient.h>
 #include <ESP8266mDNS.h>
 #include <time.h>
 #include <sntp.h>
 #include <SPI.h>
 #include <SD.h>
 
-
 // WiFi multiple access points
 ESP8266WiFiMulti wifiMulti;
+
+
+
+
 
 // Protocols
 enum proto_t {GEMINI, SPARTAN, GOPHER, HTTP};
@@ -64,7 +69,7 @@ static const char *HEADER_INTERNAL_FAIL     = "50 Internal Server Error\r\n";
 static const char *HEADER_INVALID_URL       = "59 Invalid URL\r\n";
 
 // TLS server
-// openssl req -new -x509 -keyout key.pem -out cert.pem -days 3650 -nodes -subj "/C=RO/ST=Bucharest/L=Bucharest/O=Eridu/OU=IT/CN=eridu.eu.org" -addext "subjectAltName=DNS:*.eridu.eu.org,DNS:*.eridu.duckdns.org,DNS:gemini.local,DNS:localhost"
+// openssl req -new -x509 -keyout key.pem -out cert.pem -days 3650 -nodes -subj "/C=RO/ST=Bucharest/L=Bucharest/O=Eridu/OU=IT/CN=esws.duckdns.org" -addext "subjectAltName=DNS:eridu.eu.org,DNS:*.esws.duckdns.org,DNS:esws.local,DNS:localhost"
 BearSSL::WiFiServerSecure srvGemini(PORT);
 BearSSL::X509List         *srvCert;
 BearSSL::PrivateKey       *srvKey;
@@ -94,6 +99,8 @@ WiFiServer srvGopher(70);
 
 // Networking stuff
 char *host;
+char *fqdn;
+char *ddns;
 char *ssid;
 char *pass;
 char buf[1025];
@@ -180,7 +187,7 @@ void loadCertKey() {
 }
 
 // Load hostname configuration
-void initHostname() {
+void setHostname() {
   int len = 1024;
   // Read the host name
   Serial.print(F("SYS: Reading host name from ")); Serial.print(HOSTNAME); Serial.print(F(" ... "));
@@ -189,10 +196,37 @@ void initHostname() {
     len = file.read((uint8_t*)buf, 255);
     char *token = strtok(buf, "\t\r\n");
     if (token != NULL) {
+      fqdn = strdup(token);
+      // Find the first occurence of '.' in FQDN
+      char *dom = strchr(token, '.');
+      if (dom != NULL) {
+        dom[0] = '\0';
+        host = strdup(token);
+      }
+      else
+        host = fqdn;
       Serial.println(); Serial.print(F("SYS: Setting host name to '")); Serial.print(token); Serial.println(F("'"));
-      host = new char[strlen(token) + 1];
-      strcpy(host, token);
       WiFi.hostname(host);
+    }
+  }
+  else
+    Serial.println(F("ERROR"));
+  file.close();
+}
+
+// Load DuckDNS configuration
+void loadDuckDNS() {
+  int len = 1024;
+  // Read the DuckDNS token
+  Serial.print(F("DNS: Reading DuckDNS token from ")); Serial.print(DDNS_TOK); Serial.print(F(" ... "));
+  File file = SD.open(DDNS_TOK, "r");
+  if (file.isFile()) {
+    len = file.read((uint8_t*)buf, 255);
+    char *token = strtok(buf, "\t\r\n");
+    if (token != NULL) {
+      Serial.println(F("done."));
+      ddns = new char[strlen(token) + 1];
+      strcpy(ddns, token);
     }
   }
   else
@@ -295,9 +329,24 @@ void setClock() {
   Serial.print(asctime(&timeinfo));
 }
 
+// Update DuckDNS
+bool upDuckDNS(char *subdomain, char *token) {
+  bool updated = false;
+  WiFiClient client;
+  HTTPClient http;
+  String request = "http://www.duckdns.org/update/" + String(subdomain) + "/" + String(token);
+  http.begin(client, request);
+  int httpCode = http.GET();
+  if (httpCode == HTTP_CODE_OK) {
+    String payload = http.getString();
+    if (payload == "OK")
+      updated = true;
+  }
+  http.end();
+  return updated;
+}
 
-
-void sendFile(Stream *client, int proto, char *pHost, char *pPath, char *pExt, const char *pFile) {
+void sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt, const char *pFile) {
   int dirEnd = 0;
   // Validate the path (../../ ...)
 
@@ -460,7 +509,7 @@ void sendFile(Stream *client, int proto, char *pHost, char *pPath, char *pExt, c
 }
 
 // Handle Gemini protocol
-void handleClient(BearSSL::WiFiClientSecure * client) {
+void clGemini(BearSSL::WiFiClientSecure *client) {
   char *pSchema, *pHost, *pPort, *pPath, *pExt, *pQuery, *pEOL;
   char *rsp = (char*)HEADER_INVALID_URL;
   client->setTimeout(5000);
@@ -675,7 +724,9 @@ void setup() {
   }
 
   // Set hostname
-  initHostname();
+  setHostname();
+  // Load DuckDNS config
+  loadDuckDNS();
   // Configure WiFi
   initWiFi();
   // Load the mime-types
@@ -719,6 +770,12 @@ void loop() {
         Serial.println(F("DNS: mDNS responder started"));
       }
 
+      // Update DuckDNS
+      Serial.print(F("DNS: Updating DuckDNS... "));
+      bool updated = upDuckDNS(host, ddns);
+      if (updated)  Serial.println(F("done."));
+      else          Serial.println(F("failed."));
+
       // Set clock
       setClock();
 
@@ -751,10 +808,7 @@ void loop() {
       //client.setFingerprint("39b2204993bab61373aed82c24a20919b4bb7a9fb6c9342452b3e5f6836848de");
 
       // Handle the client
-      handleClient(&client);
-      //client.flush();
-      //client.stop();
-
+      clGemini(&client);
       // LED off
       digitalWrite(LED, LOW ^ LEDinv);
     }
