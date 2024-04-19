@@ -65,7 +65,7 @@ static const char *HEADER_INVALID_URL       = "59 Invalid URL\r\n";
 
 // TLS server
 // openssl req -new -x509 -keyout key.pem -out cert.pem -days 3650 -nodes -subj "/C=RO/ST=Bucharest/L=Bucharest/O=Eridu/OU=IT/CN=eridu.eu.org" -addext "subjectAltName=DNS:*.eridu.eu.org,DNS:*.eridu.duckdns.org,DNS:gemini.local,DNS:localhost"
-BearSSL::WiFiServerSecure server(PORT);
+BearSSL::WiFiServerSecure srvGemini(PORT);
 BearSSL::X509List         *srvCert;
 BearSSL::PrivateKey       *srvKey;
 // #define USE_EC       // Enable Elliptic Curve signed cert
@@ -78,11 +78,11 @@ BearSSL::PrivateKey       *srvKey;
 
 #if defined(USE_CACHE) && defined(DYNAMIC_CACHE)
 // Dynamically allocated cache.
-BearSSL::ServerSessions   serverCache(CACHE_SIZE);
+BearSSL::ServerSessions   sslCache(CACHE_SIZE);
 #elif defined(USE_CACHE)
 // Statically allocated cache.
-ServerSession             store[CACHE_SIZE];
-BearSSL::ServerSessions   serverCache(store, CACHE_SIZE);
+ServerSession             sslStore[CACHE_SIZE];
+BearSSL::ServerSessions   sslCache(sslStore, CACHE_SIZE);
 #endif
 
 // HTTP
@@ -103,10 +103,8 @@ struct MimeTypeEntry {
   char *ext;
   char *typ;
 };
-
-typedef std::vector<MimeTypeEntry> MimeTypeList;
-MimeTypeList mtList;
-
+// Dynamically allocated vector to keep the associations
+std::vector<MimeTypeEntry> mtList;
 
 
 
@@ -234,11 +232,10 @@ void initWiFi() {
 }
 
 // Load mime-types
-void initMimeType() {
+void loadMimeTypes() {
   int len = 1024;
   char *ext;
   char *typ;
-
   // Read the mime-type definitions
   Serial.print(F("MIM: Reading mime-types from ")); Serial.print(MIMETYPE); Serial.print(F(" ... "));
   File file = SD.open(MIMETYPE, "r");
@@ -251,15 +248,18 @@ void initMimeType() {
       // Find the extension and the mime type, TAB-separated
       ext = strtok((char*)buf, "\t");
       typ = strtok(NULL, "\r\n\t");
+      // Append to vector
       if (ext != NULL and typ != NULL) {
-        Serial.println(); Serial.print(F("MIM: Add '")); Serial.print(ext); Serial.print(F("' "));
-        Serial.print(F("mime-type '")); Serial.print(typ); Serial.print(F("' "));
+        Serial.println(); Serial.print(F("MIM: Add '")); Serial.print(typ); Serial.print(F("' for '"));
+        Serial.print(ext); Serial.print(F("' "));
         MimeTypeEntry mtNew;
         mtNew.ext = strdup(ext);
         mtNew.typ = strdup(typ);
         mtList.push_back(mtNew);
       }
     }
+    // Shrink the vector now
+    mtList.shrink_to_fit();
     Serial.println();
   }
   else
@@ -679,17 +679,17 @@ void setup() {
   // Configure WiFi
   initWiFi();
   // Load the mime-types
-  initMimeType();
+  loadMimeTypes();
   // Configure secure server
   loadCertKey();
 #ifndef USE_EC
-  server.setRSACert(srvCert, srvKey);
+  srvGemini.setRSACert(srvCert, srvKey);
 #else
-  server.setECCert(srvCert, BR_KEYTYPE_KEYX | BR_KEYTYPE_SIGN, srvKey);
+  srvGemini.setECCert(srvCert, BR_KEYTYPE_KEYX | BR_KEYTYPE_SIGN, srvKey);
 #endif
   // Set the server's cache
 #if defined(USE_CACHE)
-  server.setCache(&serverCache);
+  srvGemini.setCache(&sslCache);
 #endif
 
 
@@ -723,7 +723,7 @@ void loop() {
       setClock();
 
       // Start accepting connections
-      server.begin();
+      srvGemini.begin();
       Serial.print(F("GMI: Gemini server '")); Serial.print(host); Serial.print(F(".local' started on ")); Serial.print(WiFi.localIP()); Serial.print(":"); Serial.println(PORT);
       srvSpartan.begin();
       Serial.print(F("SPN: Spartan server '")); Serial.print(host); Serial.print(F(".local' started on ")); Serial.print(WiFi.localIP()); Serial.print(":"); Serial.println(300);
@@ -740,7 +740,7 @@ void loop() {
 
     srvHTTP.handleClient();
 
-    BearSSL::WiFiClientSecure client = server.available();
+    BearSSL::WiFiClientSecure client = srvGemini.available();
     if (client) {
       // LED on
       digitalWrite(LED, HIGH ^ LEDinv);
@@ -783,7 +783,7 @@ void loop() {
   else {
     Serial.println(F("WFI: WiFi disconnected"));
     MDNS.end();
-    server.stop();
+    srvGemini.stop();
     srvHTTP.stop();
     reconn = true;
   }
