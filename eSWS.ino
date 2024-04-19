@@ -1,5 +1,7 @@
 //#define DEBUG
 
+//#define USE_UPNP
+
 // Software name and version
 #define PROGNAME    "eSWS"
 #define PROGVERS    "0.1"
@@ -34,7 +36,6 @@
 
 
 
-#define DBG_OUTPUT_PORT Serial
 
 #include <ESP8266WiFi.h>
 #include <ESP8266WiFiMulti.h>
@@ -45,6 +46,12 @@
 #include <sntp.h>
 #include <SPI.h>
 #include <SD.h>
+
+// UPnP
+#ifdef USE_UPNP
+#  include "TinyUPnP.h"
+TinyUPnP *tinyUPnP = new TinyUPnP(5000);
+#endif
 
 // WiFi multiple access points
 ESP8266WiFiMulti wifiMulti;
@@ -69,7 +76,7 @@ static const char *HEADER_INTERNAL_FAIL     = "50 Internal Server Error\r\n";
 static const char *HEADER_INVALID_URL       = "59 Invalid URL\r\n";
 
 // TLS server
-// openssl req -new -x509 -keyout key.pem -out cert.pem -days 3650 -nodes -subj "/C=RO/ST=Bucharest/L=Bucharest/O=Eridu/OU=IT/CN=esws.duckdns.org" -addext "subjectAltName=DNS:eridu.eu.org,DNS:*.esws.duckdns.org,DNS:esws.local,DNS:localhost"
+// openssl req -new -x509 -keyout key.pem -out crt.pem -days 3650 -nodes -subj "/C=RO/ST=Bucharest/L=Bucharest/O=Eridu/OU=IT/CN=esws.duckdns.org" -addext "subjectAltName=DNS:eridu.eu.org,DNS:*.esws.duckdns.org,DNS:esws.local,DNS:localhost"
 BearSSL::WiFiServerSecure srvGemini(PORT);
 BearSSL::X509List         *srvCert;
 BearSSL::PrivateKey       *srvKey;
@@ -770,6 +777,16 @@ void loop() {
         Serial.println(F("DNS: mDNS responder started"));
       }
 
+#ifdef USE_UPNP
+      // UPnP port mappings
+      Serial.println(F("NET: Adding UPnP port mappings ... "));
+      tinyUPnP->addPortMappingConfig(WiFi.localIP(), 1965, RULE_PROTOCOL_TCP, 36000, "eSWS Gemini");
+      tinyUPnP->addPortMappingConfig(WiFi.localIP(),  300, RULE_PROTOCOL_TCP, 36000, "eSWS Spartan");
+      tinyUPnP->addPortMappingConfig(WiFi.localIP(),   70, RULE_PROTOCOL_TCP, 36000, "eSWS Gopher");
+      // Commit the port mappings to the IGD
+      portMappingResult portMappingAdded = tinyUPnP->commitPortMappings();
+#endif
+
       // Update DuckDNS
       Serial.print(F("DNS: Updating DuckDNS... "));
       bool updated = upDuckDNS(host, ddns);
@@ -841,4 +858,9 @@ void loop() {
     srvHTTP.stop();
     reconn = true;
   }
+
+#ifdef USE_UPNP
+  // UPnP
+  tinyUPnP->updatePortMappings(600000, NULL);
+#endif
 }
