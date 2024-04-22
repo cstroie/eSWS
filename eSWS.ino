@@ -6,9 +6,6 @@
 #define PROGNAME    "eSWS"
 #define PROGVERS    "0.1"
 
-// SD card chip select line
-#define SDCS        (D8)
-
 // Certificate and key
 #define SSL_CERT    "/ssl/crt.pem"
 #define SSL_KEY     "/ssl/key.pem"
@@ -43,6 +40,7 @@
 #include <ESP8266HTTPClient.h>
 #include <ESP8266mDNS.h>
 #include <time.h>
+#include <TZ.h>
 #include <sntp.h>
 #include <SPI.h>
 #include <SD.h>
@@ -56,7 +54,9 @@ TinyUPnP *tinyUPnP = new TinyUPnP(5000);
 // WiFi multiple access points
 ESP8266WiFiMulti wifiMulti;
 
-
+// SD card CS pins
+int spiCS = -1;
+int spiCSPins[] = {D4, D8, D1, D2, D3, D0};
 
 
 
@@ -120,11 +120,14 @@ struct MimeTypeEntry {
 // Dynamically allocated vector to keep the associations
 std::vector<MimeTypeEntry> mtList;
 
+// Log time format
+#define LOG_TIMEFMT "[%d/%b/%Y:%H:%M:%S %z]"
+char tmbuf[30];
 
 
 // Read one line from stream, delimited by the specified char,
 // with maximum of specified lenght, and return the lenght read string
-int readln(Stream *stream, char *buf, int maxLen = 1024, char del = '\r') {
+int readln(Stream *stream, char *buf, int maxLen = 1024) {
   int len = 0;
   char c;
   while (stream->available()) {
@@ -132,15 +135,24 @@ int readln(Stream *stream, char *buf, int maxLen = 1024, char del = '\r') {
     c = stream->read();
     // Limit line length
     if (len > maxLen - 1) {
-      len = 0;
+      len = -1;
       break;
     }
-    buf[len++] = c;
-    // Break on reading delimiter or no char available
-    if (c == del or c == 255) break;
+
+    // Will always store CRLF, then ZERO
+    if (c == '\r' or c == '\0') {
+      // Consume one more char if CRLF
+      if (c == '\r' and stream->peek() == '\n')
+        stream->read();
+      buf[len++] = '\r';
+      buf[len++] = '\n';
+      buf[len] = '\0';
+      break;
+    }
+    else
+      buf[len++] = c;
   }
-  // Ensure a zero-terminated string
-  buf[len] = '\0';
+  Serial.println(buf);
   // Return the lenght
   return len;
 }
@@ -314,13 +326,18 @@ void setClock() {
   // https://www.gnu.org/software/libc/manual/html_node/TZ-Variable.html
   const char *TZstr = "EET-2EEST,M3.5.0/3,M10.5.0/4";
   //configTime(3 * 3600, 0, "pool.ntp.org", "time.nist.gov");
-  //configTime("TZ_Europe_Bucharest", "pool.ntp.org", "time.nist.gov");
 
-  sntp_stop();
-  sntp_setservername(0, "pool.ntp.org");
-  setenv("TZ", TZstr, 1);
-  tzset();
-  sntp_init();
+  configTime(TZ_Europe_Bucharest, "pool.ntp.org", "time.nist.gov");
+
+  /*
+    sntp_stop();
+    sntp_setservername(0, "pool.ntp.org");
+    setenv("TZ", TZstr, 1);
+    tzset();
+    sntp_init();
+  */
+
+  yield();
 
   Serial.print(F("NTP: Waiting for NTP time sync "));
   time_t now = time(nullptr);
@@ -333,7 +350,7 @@ void setClock() {
   struct tm timeinfo;
   gmtime_r(&now, &timeinfo);
   Serial.print(F("NTP: Current time: "));
-  Serial.print(asctime(&timeinfo));
+  Serial.print(ctime(&now));
 }
 
 // Update DuckDNS
@@ -376,6 +393,7 @@ void sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pEx
     // Check the virtual host directory exists
     File file = SD.open(filePath, "r");
     if (!file.isDirectory()) {
+      Serial.println("No virtual directory");
       // Fallback to default
       file.close();
       strcpy(filePath, "/");
@@ -383,18 +401,34 @@ void sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pEx
     }
   }
   // Append the path
+  if (filePath[strlen(filePath) - 1] != '/' and pPath[0] != '/')
+    strcat(filePath, "/");
   strcat(filePath, pPath);
+  Serial.println(filePath);
+
+  for (int i = 0; i <= strlen(filePath); i++) {
+    Serial.print(i);
+    Serial.print("\t");
+    Serial.print((char)filePath[i]);
+    Serial.print("\t");
+    Serial.println((int)filePath[i]);
+  }
 
   // Check if directory and append default file name for protocol
   File file = SD.open(filePath, "r");
   if (file.isDirectory()) {
+    Serial.println("Path is directory");
+
     file.close();
     if (filePath[strlen(filePath) - 1] != '/')
       strcat(filePath, "/");
     dirEnd = strlen(filePath);
+    Serial.println(dirEnd);
     strcat(filePath, pFile);
     file = SD.open(filePath, "r");
+    Serial.println(filePath);
   };
+  Serial.println("Path is not directory");
 
   Serial.print(F("DBG: File path: "));
   Serial.println(filePath);
@@ -403,28 +437,30 @@ void sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pEx
   if (file.isFile()) {
     // Detect mime type
     pExt = strrchr(filePath, '.');
-    if (pExt == NULL)
-      client->print(HEADER_BIN_OK);
-    else {
-      pExt++;
-      // Find the mime type
-      char *mimetype = NULL;
-      for (auto entry : mtList) {
-        if (strncmp(entry.ext, pExt, 3) == 0) {
-          mimetype = entry.typ;
-          break;
-        }
-      }
-      // TODO Add gopher and http
-      if (proto == GEMINI)
-        client->print("20 ");
-      else if (proto == SPARTAN)
-        client->print("2 ");
-      if (mimetype == NULL)
-        client->print("application/octet-stream\r\n");
+    if (proto != GOPHER) {
+      if (pExt == NULL)
+        client->print(HEADER_BIN_OK);
       else {
-        client->print(mimetype);
-        client->print(" \r\n");
+        pExt++;
+        // Find the mime type
+        char *mimetype = NULL;
+        for (auto entry : mtList) {
+          if (strncmp(entry.ext, pExt, 3) == 0) {
+            mimetype = entry.typ;
+            break;
+          }
+        }
+        // TODO Add gopher and http
+        if (proto == GEMINI)
+          client->print("20 ");
+        else if (proto == SPARTAN)
+          client->print("2 ");
+        if (mimetype == NULL)
+          client->print("application/octet-stream\r\n");
+        else {
+          client->print(mimetype);
+          client->print(" \r\n");
+        }
       }
     }
     // Send content
@@ -437,7 +473,7 @@ void sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pEx
   }
   else if (dirEnd > 0) {
     // The request was for a directory and there is no directory index.
-    // Create a file listing/
+    // Create a file listing
     // Restore the directory path
     filePath[dirEnd] = '\0';
     // Send the response
@@ -475,10 +511,17 @@ void sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pEx
             client->print("0");
           client->print(entry.name());
           client->print("\t");
+          if (pPath[0] != '/')
+            client->print("/");
           client->print(pPath);
+          if (pPath[strlen(pPath) - 1] != '/')
+            client->print("/");
           client->print(entry.name());
-          client->print("\tgemini.local\t70\r\n");
-          //client->print("\r\n");
+          if (entry.isDirectory())
+            client->print("/");
+          client->print("\t");
+          client->print(pHost);
+          client->print("\t70\r\n");
           break;
         case HTTP:
           break;
@@ -526,16 +569,25 @@ void clGemini(BearSSL::WiFiClientSecure *client) {
     // Check the length
     if (len == 0) continue;
 
-    Serial.print(F("GMI: Request ("));
-    Serial.print(len);
-    Serial.print(" bytes) '");
+    // Log
+    struct tm timeinfo;
+    getLocalTime(&timeinfo);
+    strftime(tmbuf, 30, LOG_TIMEFMT, &timeinfo);
+    Serial.print(F("LOG: "));
+    Serial.print(client->remoteIP());
+    Serial.print(" - - ");
+    Serial.print(tmbuf);
+    Serial.print (" \"");
     Serial.print(buf);
-    Serial.println("'");
+    Serial.print("\" ");
+    Serial.println();
 
+    // Check if invalid request
+    if (len < 0)
+      client->print("59 Invalid URL\r\n");
 
-    // Find CRLF as EOL
-    pEOL = strchr(buf, '\r');
-    if (pEOL == NULL) return;
+    // EOL at CRLF chars
+    pEOL = &buf[len - 2];
     pEOL[0] = '\0';
 
     // Find the schema
@@ -574,11 +626,13 @@ void clGemini(BearSSL::WiFiClientSecure *client) {
       else
         pQuery = pEOL;
 
-      Serial.print(F("Schema: ")); Serial.println(pSchema);
-      Serial.print(F("Host:   ")); Serial.println(pHost);
-      Serial.print(F("Port:   ")); Serial.println(pPort);
-      Serial.print(F("Path:   ")); Serial.println(pPath);
-      Serial.print(F("Query:  ")); Serial.println(pQuery);
+      /*
+            Serial.print(F("Schema: ")); Serial.println(pSchema);
+            Serial.print(F("Host:   ")); Serial.println(pHost);
+            Serial.print(F("Port:   ")); Serial.println(pPort);
+            Serial.print(F("Path:   ")); Serial.println(pPath);
+            Serial.print(F("Query:  ")); Serial.println(pQuery);
+      */
 
       // Send the requested file or the generated response
       sendFile(client, GEMINI, pHost, pPath, pExt, "index.gmi");
@@ -602,14 +656,26 @@ void clSpartan(WiFiClient * client) {
     // Check the length
     if (len == 0) continue;
 
-    Serial.print(F("SPN: Request ("));
-    Serial.print(len);
-    Serial.print(" bytes) '");
+    // Log
+    struct tm timeinfo;
+    getLocalTime(&timeinfo);
+    strftime(tmbuf, 30, LOG_TIMEFMT, &timeinfo);
+    Serial.print(F("LOG: "));
+    Serial.print(client->remoteIP());
+    Serial.print(" - - ");
+    Serial.print(tmbuf);
+    Serial.print (" \"");
     Serial.print(buf);
-    Serial.println("'");
+    Serial.print("\" ");
+    Serial.println();
 
-    // Find CRLF as EOL
-    pEOL = &buf[len];
+    // Check if invalid request
+    if (len < 0)
+      client->print("4 Invalid URL\r\n");
+
+    // EOL at CRLF chars
+    pEOL = &buf[len - 2];
+    pEOL[0] = '\0';
 
     // Find the host
     pHost = buf;
@@ -632,10 +698,12 @@ void clSpartan(WiFiClient * client) {
       lQuery = strtol(pLen, NULL, 10);
     }
 
-    Serial.print(F("Host: ")); Serial.println(pHost);
-    Serial.print(F("Path: ")); Serial.println(pPath);
-    Serial.print(F("Length: ")); Serial.println(lQuery);
-    Serial.print(F("Query: ")); Serial.println(pQuery);
+    /*
+        Serial.print(F("Host: ")); Serial.println(pHost);
+        Serial.print(F("Path: ")); Serial.println(pPath);
+        Serial.print(F("Length: ")); Serial.println(lQuery);
+        Serial.print(F("Query: ")); Serial.println(pQuery);
+    */
 
     // Send the requested file or the generated response
     sendFile(client, SPARTAN, pHost, pPath, pExt, "index.gmi");
@@ -652,36 +720,55 @@ void clGopher(WiFiClient * client) {
   while (client->connected()) {
     // Read one line from request
     int len = readln(client, buf);
-    if (len) {
-      Serial.print(F("GPH: Request ("));
-      Serial.print(len);
-      Serial.print(" bytes) '");
-      Serial.print(buf);
-      Serial.println("'");
+    // Check the length
+    if (len == 0) continue;
 
-      char *pPath, *pExt, *pQuery, *pEOL;
+    // Log
+    struct tm timeinfo;
+    getLocalTime(&timeinfo);
+    strftime(tmbuf, 30, LOG_TIMEFMT, &timeinfo);
+    Serial.print(F("LOG: "));
+    Serial.print(client->remoteIP());
+    Serial.print(" - - ");
+    Serial.print(tmbuf);
+    Serial.print (" \"");
+    Serial.print(buf);
+    Serial.print("\" ");
+    Serial.println();
 
-      // Find CRLF as EOL
-      pEOL = &buf[len];
+    char *pPath, *pExt, *pQuery, *pEOL;
 
-      // Find the host
-      pPath = buf;
+    // Path might be empty, in this case will consider root ('/')
+    if (buf[0] == '\r') {
+      buf[0] = '/';
+      buf[1] = '\0';
+      pEOL = &buf[1];
+    }
+    else {
       // Find the path
-      pQuery = strchr(pPath, '?');
+      pPath = buf;
+      // Find the query
+      pQuery = strchr(pPath, '\t');
       if (pQuery != NULL) {
         pQuery[0] = '\0';
         pQuery++;
       }
-
-      if (strlen(pPath) == 1)
-        pPath[0] = '/';
-
-      sendFile(client, GOPHER, NULL, pPath, pExt, "gopher.map");
-      client->print("\r\n.\r\n");
-
-      client->flush();
-      client->stop();
+      // Find EOL
+      pEOL = strchr(buf, '\r');
+      pEOL[0] = '\0';
     }
+
+    Serial.print(F("Path: ")); Serial.println(pPath);
+    Serial.print(F("Query: ")); Serial.println(pQuery);
+
+
+
+    sendFile(client, GOPHER, "esws.duckdns.org", pPath, pExt, "gopher.map");
+    client->print("\r\n.\r\n");
+
+    client->flush();
+    client->stop();
+
   }
 }
 
@@ -706,19 +793,16 @@ void setup() {
   // SPI
   SPI.begin();
   // Init SD card
-  Serial.print(F("SYS: Initializing SD card: "));
-  if (!SD.begin(SDCS)) {
-    Serial.println(F("failed!"));
-    while (true) {
-      yield();
-      // Flash the led
-      digitalWrite(LED, HIGH ^ LEDinv); delay(50);
-      digitalWrite(LED, LOW  ^ LEDinv); delay(50);
-      digitalWrite(LED, HIGH ^ LEDinv); delay(50);
-      digitalWrite(LED, LOW  ^ LEDinv); delay(250);
+  Serial.print(F("SYS: Searching SD card, trying CS "));
+  for (auto cs : spiCSPins) {
+    Serial.print(cs); Serial.print(" ");
+    if (SD.begin(cs)) {
+      spiCS = cs;
+      break;
     }
   }
-  else {
+  if (spiCS > -1) {
+    Serial.println(F("found!"));
     switch (SD.type()) {
       case 1:  Serial.print(F("SD1"));  break;
       case 2:  Serial.print(F("SD2"));  break;
@@ -728,6 +812,17 @@ void setup() {
     Serial.printf(" FAT % d % dMb\r\n", SD.fatType(), SD.size64() / 1048576);
     // Set time callback
     //SD.setTimeCallback(timeCallback);
+  }
+  else {
+    Serial.println(F("failed!"));
+    while (true) {
+      yield();
+      // Flash the led
+      digitalWrite(LED, HIGH ^ LEDinv); delay(50);
+      digitalWrite(LED, LOW  ^ LEDinv); delay(50);
+      digitalWrite(LED, HIGH ^ LEDinv); delay(50);
+      digitalWrite(LED, LOW  ^ LEDinv); delay(250);
+    }
   }
 
   // Set hostname
