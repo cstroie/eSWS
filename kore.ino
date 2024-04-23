@@ -120,10 +120,12 @@ char buf[1025];
 // Mime types list
 struct MimeTypeEntry {
   char *ext;
-  char *typ;
+  char *mmt;
+  char gph;
 };
 // Dynamically allocated vector to keep the associations
 std::vector<MimeTypeEntry> mtList;
+char binMimeType[] = "application/octet-stream";
 
 // Log time format
 #define LOG_TIMEFMT "[%d/%b/%Y:%H:%M:%S %z]"
@@ -304,7 +306,8 @@ void initWiFi() {
 void loadMimeTypes() {
   int len = 1024;
   char *ext;
-  char *typ;
+  char *mmt;
+  char *gph;
   // Read the mime-type definitions
   Serial.print(F("MIM: Reading mime-types from ")); Serial.print(MIMETYPE); Serial.print(F(" ... "));
   File file = SD.open(MIMETYPE, "r");
@@ -316,14 +319,16 @@ void loadMimeTypes() {
       if (buf[0] == '#') continue;
       // Find the extension and the mime type, TAB-separated
       ext = strtok((char*)buf, "\t");
-      typ = strtok(NULL, "\r\n\t");
+      gph = strtok(NULL, "\t");
+      mmt = strtok(NULL, "\r\n\t");
       // Append to vector
-      if (ext != NULL and typ != NULL) {
-        Serial.println(); Serial.print(F("MIM: Add '")); Serial.print(typ); Serial.print(F("' for '"));
+      if (ext != NULL and mmt != NULL) {
+        Serial.println(); Serial.print(F("MIM: Add '")); Serial.print(mmt); Serial.print(F("' for '"));
         Serial.print(ext); Serial.print(F("' "));
         MimeTypeEntry mtNew;
         mtNew.ext = strdup(ext);
-        mtNew.typ = strdup(typ);
+        mtNew.gph = gph[0];
+        mtNew.mmt = strdup(mmt);
         mtList.push_back(mtNew);
       }
     }
@@ -412,7 +417,14 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
   int fileSize = 0;
   int dirEnd = 0;
   // Validate the path (../../ ...)
-
+  if (strstr(pPath, "..") != NULL) {
+    if (proto == GEMINI)
+      client->print("59");
+    else if (proto == SPARTAN)
+      client->print("4");
+    client->print(" Invalid path\r\n");
+    return 0;
+  }
   // Virtual hosting
   int hostLen = strlen(fqdn);
   // Find the longest host name
@@ -455,41 +467,49 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
     file = SD.open(filePath, "r");
   };
 
-  Serial.print(F("DBG: File path: "));
-  Serial.println(filePath);
+  //Serial.print(F("DBG: File path: "));
+  //Serial.println(filePath);
 
   // Check if the file exists
   if (file.isFile()) {
+    // Keep the size
+    fileSize = file.size();
     // Detect mime type
     pExt = strrchr(filePath, '.');
     if (proto != GOPHER) {
       if (pExt == NULL) {
-        // TODO add HTTP
-        if      (proto == GEMINI)  client->print("20 ");
-        else if (proto == SPARTAN) client->print("2 ");
-        client->print("application/octet-stream\r\n");
+        // No file extension
+        if      (proto == GEMINI)   client->print("20 ");
+        else if (proto == SPARTAN)  client->print("2 ");
+        else if (proto == HTTP)     client->print(F("HTTP/1.0 200 OK\r\nContent-Type: "));
+        client->print(binMimeType);
+        client->print(F("\r\n"));
+        if      (proto == HTTP)     client->print(F("\r\n"));
       }
       else {
+        // Extension found
         pExt++;
         // Find the mime type
         char *mimetype = NULL;
         for (auto entry : mtList) {
           if (strncmp(entry.ext, pExt, 3) == 0) {
-            mimetype = entry.typ;
+            mimetype = entry.mmt;
             break;
           }
         }
-        // TODO Add http
+        if (mimetype == NULL)
+          mimetype = binMimeType;
+        // Send header, with one extra new line for HTTP
         if (proto == GEMINI)
           client->print("20 ");
         else if (proto == SPARTAN)
           client->print("2 ");
-        if (mimetype == NULL)
-          client->print("application/octet-stream\r\n");
-        else {
-          client->print(mimetype);
-          client->print(" \r\n");
-        }
+        else if (proto == HTTP)
+          client->print(F("HTTP/1.0 200 OK\r\nContent-Type: "));
+        client->print(mimetype);
+        client->print(F("\r\n"));
+        if (proto == HTTP)
+          client->print(F("\r\n"));
       }
     }
     // Send content
@@ -519,25 +539,48 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
         client->print(pPath);
         client->print("\r\n\r\n");
         break;
-      case HTTP:
-        break;
-      default:
+      case GEMINI:
         client->print("20 text/gemini\r\n");
         client->print("# Content of ");
         client->print(pPath);
         client->print("\r\n\r\n");
+      case HTTP:
+        client->print(F("HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\n"));
+        client->print("Content of ");
+        client->print(pPath);
+        client->print("\r\n\r\n");
+        break;
     }
     // List files in SD
     File root = SD.open(filePath);
     while (File entry = root.openNextFile()) {
       // Ignore hidden files
       if (entry.name()[0] == '.') continue;
+      // Different for different protocols
       switch (proto) {
         case GOPHER:
           if (entry.isDirectory())
             client->print("1");
-          else
-            client->print("0");
+          else {
+            // Detect type type
+            pExt = strrchr(entry.name(), '.');
+            if (pExt == NULL)
+              // No file extension
+              client->print("9");
+            else {
+              // Extension found
+              pExt++;
+              // Find the type
+              char gph = '9';
+              for (auto entry : mtList) {
+                if (strncmp(entry.ext, pExt, 3) == 0) {
+                  gph = entry.gph;
+                  break;
+                }
+              }
+              client->print(gph);
+            }
+          }
           client->print(entry.name());
           client->print("\t");
           if (pPath[0] != '/')
@@ -553,7 +596,6 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
           client->print("\t70\r\n");
           break;
         case HTTP:
-          break;
         case SPARTAN:
         case GEMINI:
           client->print("=> ");
@@ -569,7 +611,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
       }
     }
   }
-  else if (strcmp(pPath, "/status.gmi") == 0) {
+  else if (strcmp(pPath, "/status.gmi") == 0 and proto == GEMINI) {
     client->print("20 text/gemini\r\n");
     client->print("# Server status\r\n\r\n");
     // Hostname
@@ -593,8 +635,13 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
     // Read the Vcc (mV)
     client->print("Voltage: "); client->print(ESP.getVcc()); client->print(" mV\r\n");
   }
-  else
-    client->print("51 File Not Found\r\n");
+  else {
+    if      (proto == GEMINI)   client->print("51");
+    else if (proto == SPARTAN)  client->print("4");
+    else if (proto == HTTP)     client->print(F("HTTP/1.0 404"));
+    client->print(F(" File not found\r\n"));
+    if      (proto == HTTP)     client->print(F("\r\n"));
+  }
   // Destroy the file path string
   delete(filePath);
   // Return the file size
@@ -621,7 +668,7 @@ void logPrint(int code, int size) {
 }
 
 // Handle Gemini protocol
-void clGemini(BearSSL::WiFiClientSecure *client) {
+void clGemini(BearSSL::WiFiClientSecure * client) {
   char *pSchema, *pHost, *pPort, *pPath, *pExt, *pQuery, *pEOL;
   // Prepare the log
   getLocalTime(&logTime);
@@ -877,6 +924,10 @@ void clHTTP(WiFiClient * client) {
     if (len == 0) continue;
     // If last char is not zero, the line is not complete
     if (buf[len] != '\0') continue;
+
+    // Read and ignore the rest of the request
+    while (client->available())
+      client->read();
 
     // Print the first part of the log line
     logPrint(client->remoteIP());
