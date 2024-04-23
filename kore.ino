@@ -127,7 +127,10 @@ std::vector<MimeTypeEntry> mtList;
 
 // Log time format
 #define LOG_TIMEFMT "[%d/%b/%Y:%H:%M:%S %z]"
-char tmbuf[30];
+struct tm logTime;
+char bufTime[30];
+int logErrCode;
+int fileSize;
 
 // Set ADC to Voltage
 ADC_MODE(ADC_VCC);
@@ -215,7 +218,7 @@ void loadCertKey() {
   }
   file.close();
   if (!haveRSAKeyCert)
-  Serial.println(F("GMI: No RSA key and/or certificate. Gemini server is disabled."));
+    Serial.println(F("GMI: No RSA key and/or certificate. Gemini server is disabled."));
 }
 
 // Load hostname configuration
@@ -405,7 +408,8 @@ unsigned long uptime(char *buf, size_t len) {
   return upt;
 }
 
-void sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt, const char *pFile) {
+int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt, const char *pFile) {
+  int fileSize = 0;
   int dirEnd = 0;
   // Validate the path (../../ ...)
 
@@ -593,12 +597,38 @@ void sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pEx
     client->print("51 File Not Found\r\n");
   // Destroy the file path string
   delete(filePath);
+  // Return the file size
+  return fileSize;
+}
+
+// Print the first part of the log line
+void logPrint(IPAddress ip) {
+  strftime(bufTime, 30, LOG_TIMEFMT, &logTime);
+  Serial.print(F("LOG: "));
+  Serial.print(ip);
+  Serial.print(" - - ");
+  Serial.print(bufTime);
+  Serial.print (" \"");
+  Serial.print(buf);
+  Serial.print("\" ");
+}
+
+// Print the last part of the log line
+void logPrint(int code, int size) {
+  Serial.print(code);
+  Serial.print (" ");
+  Serial.println(size);
 }
 
 // Handle Gemini protocol
 void clGemini(BearSSL::WiFiClientSecure *client) {
   char *pSchema, *pHost, *pPort, *pPath, *pExt, *pQuery, *pEOL;
+  // Prepare the log
+  getLocalTime(&logTime);
+  logErrCode = 20;
+  // Set a global time out
   unsigned long timeOut = millis() + 5000;
+  // Loop as long as connected (and before timed out)
   while (client->connected() and millis() < timeOut) {
     // Read one line from request
     int len = readln(client, buf);
@@ -607,87 +637,94 @@ void clGemini(BearSSL::WiFiClientSecure *client) {
     // If last char is not zero, the line is not complete
     if (buf[len] != '\0') continue;
 
-    // Prepare the log
-    struct tm timeinfo;
-    getLocalTime(&timeinfo);
-    strftime(tmbuf, 30, LOG_TIMEFMT, &timeinfo);
-    Serial.print(F("LOG: "));
-    Serial.print(client->remoteIP());
-    Serial.print(" - - ");
-    Serial.print(tmbuf);
-    Serial.print (" \"");
-    Serial.print(buf);
-    Serial.print("\" ");
-    Serial.println();
+    // The buffer has at least 2 chars (CR LF) if no error
+    if (len >= 2) {
+      // Set EOL at CRLF chars
+      pEOL = &buf[len - 2];
+      // Trim the string
+      pEOL[0] = '\0';
+    }
 
-    // Check if the buffer is full and CRLF not found
-    if (len < 0)
+    // Print the first part of the log line
+    logPrint(client->remoteIP());
+
+    // Check if the buffer was overflown
+    if (len < 0) {
+      logErrCode = 59;
       client->print("59 Invalid URL\r\n");
-
-    // Set EOL at CRLF chars
-    pEOL = &buf[len - 2];
-    // Trim the string
-    pEOL[0] = '\0';
+      break;
+    }
 
     // Find the schema
-    if (strncmp(buf, "gemini://", 9) == 0) {
-      pSchema = buf;
-      pSchema[6] = '\0';
-      pHost = pSchema + 7;
-      // Move the host down 2 chars
-      int i;
-      for (i = 0; pHost[i + 2] != '/' and pHost[i + 2] != '?' and pHost[i + 2] != '\0'; i++)
-        pHost[i] = pHost[i + 2];
-      pHost[i] = '\0';
-      // Find the requested path
-      if (pHost[i + 2] == '/') {
-        pPath = &pHost[i + 2];
-        pHost[i + 1] = '\0';
-      }
-      else  {
-        pPath = &pHost[i + 1];
-        pPath[0] = '/';
-      }
-      // Find the port, if any
-      pPort = strchr(pHost, ':');
-      if (pPort == NULL)
-        pPort = pEOL;
-      else {
-        pPort[0] = '\0';
-        pPort++;
-      }
-      // Find the query
-      pQuery = strchr(pPath, '?');
-      if (pQuery != NULL) {
-        pQuery[0] = '\0';
-        pQuery++;
-      }
-      else
-        pQuery = pEOL;
+    if (strncmp(buf, "gemini://", 9) != 0) {
+      logErrCode = 59;
+      client->print("59 Unsupported protocol\r\n");
+      break;
+    }
 
-      /*
-            Serial.print(F("Schema: ")); Serial.println(pSchema);
-            Serial.print(F("Host:   ")); Serial.println(pHost);
-            Serial.print(F("Port:   ")); Serial.println(pPort);
-            Serial.print(F("Path:   ")); Serial.println(pPath);
-            Serial.print(F("Query:  ")); Serial.println(pQuery);
-      */
-
-      // Send the requested file or the generated response
-      sendFile(client, GEMINI, pHost, pPath, pExt, "index.gmi");
+    // Decompose the request
+    pSchema = buf;
+    pSchema[6] = '\0';
+    pHost = pSchema + 7;
+    // Move the host down 2 chars
+    int i;
+    for (i = 0; pHost[i + 2] != '/' and pHost[i + 2] != '?' and pHost[i + 2] != '\0'; i++)
+      pHost[i] = pHost[i + 2];
+    pHost[i] = '\0';
+    // Find the requested path
+    if (pHost[i + 2] == '/') {
+      pPath = &pHost[i + 2];
+      pHost[i + 1] = '\0';
+    }
+    else  {
+      pPath = &pHost[i + 1];
+      pPath[0] = '/';
+    }
+    // Find the port, if any
+    pPort = strchr(pHost, ':');
+    if (pPort == NULL)
+      pPort = pEOL;
+    else {
+      pPort[0] = '\0';
+      pPort++;
+    }
+    // Find the query
+    pQuery = strchr(pPath, '?');
+    if (pQuery != NULL) {
+      pQuery[0] = '\0';
+      pQuery++;
     }
     else
-      client->print("59 Unsupported protocol\r\n");
-    // Close connection
-    client->flush();
-    client->stop();
+      pQuery = pEOL;
+
+    /*
+          Serial.print(F("Schema: ")); Serial.println(pSchema);
+          Serial.print(F("Host:   ")); Serial.println(pHost);
+          Serial.print(F("Port:   ")); Serial.println(pPort);
+          Serial.print(F("Path:   ")); Serial.println(pPath);
+          Serial.print(F("Query:  ")); Serial.println(pQuery);
+    */
+
+    // Send the requested file or the generated response
+    fileSize = sendFile(client, GEMINI, pHost, pPath, pExt, "index.gmi");
+    // We can now safely break the loop
+    break;
   }
+  // Print final log part
+  logPrint(logErrCode, fileSize);
+  // Close connection
+  client->flush();
+  client->stop();
 }
 
 // Handle Spartan protocol
 void clSpartan(WiFiClient * client) {
   char *pHost, *pPath, *pExt, *pQuery, *pLen, *pEOL;
   long int lQuery;
+  // Prepare the log
+  getLocalTime(&logTime);
+  logErrCode = 2;
+  // Set a global time out
   unsigned long timeOut = millis() + 5000;
   while (client->connected() and millis() < timeOut) {
     // Read one line from request
@@ -697,44 +734,44 @@ void clSpartan(WiFiClient * client) {
     // If last char is not zero, the line is not complete
     if (buf[len] != '\0') continue;
 
-    // Prepare the log
-    struct tm timeinfo;
-    getLocalTime(&timeinfo);
-    strftime(tmbuf, 30, LOG_TIMEFMT, &timeinfo);
-    Serial.print(F("LOG: "));
-    Serial.print(client->remoteIP());
-    Serial.print(" - - ");
-    Serial.print(tmbuf);
-    Serial.print (" \"");
-    Serial.print(buf);
-    Serial.print("\" ");
-    Serial.println();
+    // The buffer has at least 2 chars (CR LF) if no error
+    if (len >= 2) {
+      // Set EOL at CRLF chars
+      pEOL = &buf[len - 2];
+      // Trim the string
+      pEOL[0] = '\0';
+    }
 
-    // Check if the buffer is full and CRLF not found
-    if (len < 0)
+    // Print the first part of the log line
+    logPrint(client->remoteIP());
+
+    // Check if the buffer was overflown
+    if (len < 0) {
+      logErrCode = 4;
       client->print("4 Invalid request\r\n");
+      break;
+    }
 
-    // Set EOL at CRLF chars
-    pEOL = &buf[len - 2];
-    // Trim the string
-    pEOL[0] = '\0';
-
-    // Find the host
+    // Analyze the request
     pHost = buf;
     // Find the path
     pPath = strchr(pHost, ' ');
-    if (pPath == NULL)
-      // FIXME
-      return;
+    if (pPath == NULL) {
+      logErrCode = 4;
+      client->print("4 Invalid request\r\n");
+      break;
+    }
     else {
       pPath[0] = '\0';
       pPath++;
     }
     // Find the length
     pLen = strchr(pPath, ' ');
-    if (pLen == NULL)
-      // FIXME
-      return;
+    if (pLen == NULL) {
+      logErrCode = 4;
+      client->print("4 Invalid request\r\n");
+      break;
+    }
     else {
       pLen[0] = '\0';
       pLen++;
@@ -750,15 +787,23 @@ void clSpartan(WiFiClient * client) {
     */
 
     // Send the requested file or the generated response
-    sendFile(client, SPARTAN, pHost, pPath, pExt, "index.gmi");
-    // Close connection
-    client->flush();
-    client->stop();
+    fileSize = sendFile(client, SPARTAN, pHost, pPath, pExt, "index.gmi");
+    // We can now safely break the loop
+    break;
   }
+  // Print final log part
+  logPrint(logErrCode, fileSize);
+  // Close connection
+  client->flush();
+  client->stop();
 }
 
 // Handle Gopher protocol
 void clGopher(WiFiClient * client) {
+  // Prepare the log
+  getLocalTime(&logTime);
+  logErrCode = 0;
+  // Set a global time out
   unsigned long timeOut = millis() + 5000;
   while (client->connected() and millis() < timeOut) {
     // Read one line from request
@@ -768,21 +813,7 @@ void clGopher(WiFiClient * client) {
     // If last char is not zero, the line is not complete
     if (buf[len] != '\0') continue;
 
-    // Prepare the log
-    struct tm timeinfo;
-    getLocalTime(&timeinfo);
-    strftime(tmbuf, 30, LOG_TIMEFMT, &timeinfo);
-    Serial.print(F("LOG: "));
-    Serial.print(client->remoteIP());
-    Serial.print(" - - ");
-    Serial.print(tmbuf);
-    Serial.print (" \"");
-    Serial.print(buf);
-    Serial.print("\" ");
-    Serial.println();
-
     char *pPath, *pExt, *pQuery, *pEOL;
-
     // Path might be empty, in this case will consider root ('/')
     if (buf[0] == '\r') {
       buf[0] = '/';
@@ -792,33 +823,52 @@ void clGopher(WiFiClient * client) {
     else {
       // Find the path
       pPath = buf;
-      // Find the query
-      pQuery = strchr(pPath, '\t');
-      if (pQuery != NULL) {
-        pQuery[0] = '\0';
-        pQuery++;
-      }
-      // Find EOL
-      pEOL = strchr(buf, '\r');
+      // Set EOL at CRLF chars
+      pEOL = &buf[len - 2];
       // Trim the string
       pEOL[0] = '\0';
     }
+
+    // Print the first part of the log line
+    logPrint(client->remoteIP());
+
+    // Check if the buffer was overflown
+    if (len < 0) {
+      logErrCode = 1;
+      break;
+    }
+
+    // Find the query
+    pQuery = strchr(pPath, '\t');
+    if (pQuery != NULL) {
+      pQuery[0] = '\0';
+      pQuery++;
+    }
+
 
     /*
         Serial.print(F("Path: ")); Serial.println(pPath);
         Serial.print(F("Query: ")); Serial.println(pQuery);
     */
 
-    sendFile(client, GOPHER, fqdn, pPath, pExt, "gopher.map");
+    fileSize = sendFile(client, GOPHER, fqdn, pPath, pExt, "gopher.map");
     client->print("\r\n.\r\n");
-    // Close connection
-    client->flush();
-    client->stop();
+    // We can now safely break the loop
+    break;
   }
+  // Print final log part
+  logPrint(logErrCode, fileSize);
+  // Close connection
+  client->flush();
+  client->stop();
 }
 
 // Handle HTTP protocol
 void clHTTP(WiFiClient * client) {
+  // Prepare the log
+  getLocalTime(&logTime);
+  logErrCode = 200;
+  // Set a global time out
   unsigned long timeOut = millis() + 5000;
   while (client->connected() and millis() < timeOut) {
     // Read one line from request
@@ -828,24 +878,18 @@ void clHTTP(WiFiClient * client) {
     // If last char is not zero, the line is not complete
     if (buf[len] != '\0') continue;
 
-    // Prepare the log
-    struct tm timeinfo;
-    getLocalTime(&timeinfo);
-    strftime(tmbuf, 30, LOG_TIMEFMT, &timeinfo);
-    Serial.print(F("LOG: "));
-    Serial.print(client->remoteIP());
-    Serial.print(" - - ");
-    Serial.print(tmbuf);
-    Serial.print (" \"");
-    Serial.print(buf);
-    Serial.print("\" ");
-    Serial.println();
+    // Print the first part of the log line
+    logPrint(client->remoteIP());
 
     client->print(F("HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\nHi, Bob!"));
-    // Close connection
-    client->flush();
-    client->stop();
+    // FIXME
+    fileSize = 0;
   }
+  // Print final log part
+  logPrint(logErrCode, fileSize);
+  // Close connection
+  client->flush();
+  client->stop();
 }
 
 
