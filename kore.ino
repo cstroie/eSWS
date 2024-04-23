@@ -1,9 +1,29 @@
+/**
+  kore - Embedded small net multi-protocol server for ESP8266
+
+  Copyright (c) 2024 Costin STROIE <costinstroie@eridu.eu.org>
+
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, orl
+  (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
+// The DEBUG flag
 //#define DEBUG
 
 //#define USE_UPNP
 
 // Software name and version
-#define PROGNAME    "eSWS"
+#define PROGNAME    "kore"
 #define PROGVERS    "0.2"
 
 // Certificate and key
@@ -815,15 +835,18 @@ void handleHTTPRoot() {
 
 // Main Arduino setup function
 void setup() {
+  // Init the serial interface
+  Serial.begin(115200);
+  Serial.println();
+  Serial.print(PROGNAME);
+  Serial.print(F(" "));
+  Serial.print(PROGVERS);
+  Serial.print(F(" "));
+  Serial.println(__DATE__);
+
   // Configure the LED
   pinMode(LED, OUTPUT);
   digitalWrite(LED, LOW ^ LEDinv);
-
-  // Serial port configuration
-  Serial.flush();
-  Serial.begin(115200);
-  Serial.print(F("\r\n"));
-  Serial.print(F("\r\n"));
 
   // SPI
   SPI.begin();
