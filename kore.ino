@@ -38,9 +38,6 @@
 // Mime types
 #define MIMETYPE    "/mimetype.cfg"
 
-// TCP port
-#define PORT        (1965)
-
 // LED configuration
 #define LEDinv      (true)
 #if defined(BUILTIN_LED)
@@ -56,7 +53,6 @@
 
 #include <ESP8266WiFi.h>
 #include <ESP8266WiFiMulti.h>
-#include <ESP8266WebServer.h>
 #include <ESP8266HTTPClient.h>
 #include <ESP8266mDNS.h>
 #include <time.h>
@@ -83,21 +79,9 @@ int spiCSPins[] = {D4, D8, D1, D2, D3, D0};
 // Protocols
 enum proto_t {GEMINI, SPARTAN, GOPHER, HTTP};
 
-// response headers
-static const char *HEADER_GEM_OK            = "20 text/gemini\r\n";                 // .gmi
-static const char *HEADER_MARKDOWN_OK       = "20 text/markdown\r\n";               // .md
-static const char *HEADER_PLAIN_OK          = "20 text/plain\r\n";                  // .txt
-static const char *HEADER_HTML_OK           = "20 text/html\r\n";                   // .htm
-static const char *HEADER_JPEG_OK           = "20 image/jpeg\r\n";                  // .jpg
-static const char *HEADER_PNG_OK            = "20 image/png\r\n";                   // .png
-static const char *HEADER_BIN_OK            = "20 application/octet-stream\r\n";    // other stuff
-static const char *HEADER_NOT_FOUND         = "51 File Not Found\r\n";
-static const char *HEADER_INTERNAL_FAIL     = "50 Internal Server Error\r\n";
-static const char *HEADER_INVALID_URL       = "59 Invalid URL\r\n";
-
 // TLS server
 // openssl req -new -x509 -keyout key.pem -out crt.pem -days 3650 -nodes -subj "/C=RO/ST=Bucharest/L=Bucharest/O=Eridu/OU=IT/CN=koremoon.duckdns.org" -addext "subjectAltName=DNS:eridu.eu.org,DNS:kore.eridu.eu.org,DNS:koremoon.duckdns.org,DNS:*.koremoon.duckdns.org,DNS:koremoon.localDNS:kore.local,DNS:localhost"
-BearSSL::WiFiServerSecure srvGemini(PORT);
+BearSSL::WiFiServerSecure srvGemini(1965);
 BearSSL::X509List         *srvCert;
 BearSSL::PrivateKey       *srvKey;
 // #define USE_EC       // Enable Elliptic Curve signed cert
@@ -116,9 +100,10 @@ BearSSL::ServerSessions   sslCache(CACHE_SIZE);
 ServerSession             sslStore[CACHE_SIZE];
 BearSSL::ServerSessions   sslCache(sslStore, CACHE_SIZE);
 #endif
+bool haveRSAKeyCert = true;
 
 // HTTP
-ESP8266WebServer srvHTTP(80);
+WiFiServer srvHTTP(80);
 // Spartan
 WiFiServer srvSpartan(300);
 // Gopher
@@ -210,21 +195,27 @@ void loadCertKey() {
   Serial.print(F("SYS: Reading SSL certificate from ")); Serial.print(SSL_CERT); Serial.print(F(" ... "));
   file = SD.open(SSL_CERT, "r");
   if (file.isFile()) {
-    Serial.println();
+    Serial.println(F("done."));
     srvCert = new BearSSL::X509List(file, file.size());
   }
-  else
-    Serial.println(F("ERROR"));
+  else {
+    haveRSAKeyCert = false;
+    Serial.println(F("failed."));
+  }
   file.close();
   Serial.print(F("SYS: Reading SSL key from ")); Serial.print(SSL_KEY); Serial.print(F(" ... "));
   file = SD.open(SSL_KEY, "r");
   if (file.isFile()) {
-    Serial.println();
+    Serial.println(F("done."));
     srvKey = new BearSSL::PrivateKey(file, file.size());
   }
-  else
-    Serial.println(F("ERROR"));
+  else {
+    haveRSAKeyCert = false;
+    Serial.println(F("failed."));
+  }
   file.close();
+  if (!haveRSAKeyCert)
+  Serial.println(F("GMI: No RSA key and/or certificate. Gemini server is disabled."));
 }
 
 // Load hostname configuration
@@ -687,10 +678,10 @@ void clGemini(BearSSL::WiFiClientSecure *client) {
     }
     else
       client->print("59 Unsupported protocol\r\n");
+    // Close connection
+    client->flush();
+    client->stop();
   }
-  // Close connection
-  client->flush();
-  client->stop();
 }
 
 // Handle Spartan protocol
@@ -760,12 +751,11 @@ void clSpartan(WiFiClient * client) {
 
     // Send the requested file or the generated response
     sendFile(client, SPARTAN, pHost, pPath, pExt, "index.gmi");
+    // Close connection
+    client->flush();
+    client->stop();
   }
-  // Close connection
-  client->flush();
-  client->stop();
 }
-
 
 // Handle Gopher protocol
 void clGopher(WiFiClient * client) {
@@ -821,17 +811,43 @@ void clGopher(WiFiClient * client) {
 
     sendFile(client, GOPHER, fqdn, pPath, pExt, "gopher.map");
     client->print("\r\n.\r\n");
+    // Close connection
+    client->flush();
+    client->stop();
   }
-  // Close connection
-  client->flush();
-  client->stop();
 }
 
+// Handle HTTP protocol
+void clHTTP(WiFiClient * client) {
+  unsigned long timeOut = millis() + 5000;
+  while (client->connected() and millis() < timeOut) {
+    // Read one line from request
+    int len = readln(client, buf);
+    // If zero, there is no data yet; read again
+    if (len == 0) continue;
+    // If last char is not zero, the line is not complete
+    if (buf[len] != '\0') continue;
 
+    // Prepare the log
+    struct tm timeinfo;
+    getLocalTime(&timeinfo);
+    strftime(tmbuf, 30, LOG_TIMEFMT, &timeinfo);
+    Serial.print(F("LOG: "));
+    Serial.print(client->remoteIP());
+    Serial.print(" - - ");
+    Serial.print(tmbuf);
+    Serial.print (" \"");
+    Serial.print(buf);
+    Serial.print("\" ");
+    Serial.println();
 
-void handleHTTPRoot() {
-  srvHTTP.send(200, "text/plain", "Hi, Bob!");
+    client->print(F("HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\nHi, Bob!"));
+    // Close connection
+    client->flush();
+    client->stop();
+  }
 }
+
 
 // Main Arduino setup function
 void setup() {
@@ -902,17 +918,13 @@ void setup() {
 #if defined(USE_CACHE)
   srvGemini.setCache(&sslCache);
 #endif
-
-
-  srvHTTP.on("/", handleHTTPRoot);
-  //server.onNotFound(handleNotFound);
 }
 
 // Main Arduino loop
 void loop() {
-  static bool reconn = true;
+  static bool reconnecting = true;
   if (wifiMulti.run(5000) == WL_CONNECTED) {
-    if (reconn) {
+    if (reconnecting) {
       // Connected
       Serial.print(F("SYS: WiFi connected: "));
       Serial.println(WiFi.SSID());
@@ -924,7 +936,9 @@ void loop() {
         Serial.println(F("DNS: Error setting up MDNS"));
       }
       else {
-        MDNS.addService("gemini", "tcp", PORT);
+        if (haveRSAKeyCert)
+          MDNS.addService("gemini", "tcp", 1965);
+        MDNS.addService("spartan", "tcp", 300);
         MDNS.addService("http",   "tcp", 80);
         MDNS.addService("gopher", "tcp", 70);
         Serial.println(F("DNS: mDNS responder started"));
@@ -952,37 +966,39 @@ void loop() {
       setClock();
 
       // Start accepting connections
-      srvGemini.begin();
-      Serial.print(F("GMI: Gemini server '")); Serial.print(host); Serial.print(F(".local' started on ")); Serial.print(WiFi.localIP()); Serial.print(":"); Serial.println(PORT);
+      if (haveRSAKeyCert) {
+        srvGemini.begin();
+        Serial.print(F("GMI: Gemini server '")); Serial.print(host); Serial.print(F(".local' started on ")); Serial.print(WiFi.localIP()); Serial.print(":"); Serial.println(1965);
+      };
       srvSpartan.begin();
       Serial.print(F("SPN: Spartan server '")); Serial.print(host); Serial.print(F(".local' started on ")); Serial.print(WiFi.localIP()); Serial.print(":"); Serial.println(300);
       srvGopher.begin();
       Serial.print(F("GPH: Gopher server '")); Serial.print(host); Serial.print(F(".local' started on ")); Serial.print(WiFi.localIP()); Serial.print(":"); Serial.println(70);
       srvHTTP.begin();
-      Serial.println("HTTP server started");
+      Serial.print(F("HTP: HTTP server '")); Serial.print(host); Serial.print(F(".local' started on ")); Serial.print(WiFi.localIP()); Serial.print(":"); Serial.println(80);
 
-      reconn = false;
+      reconnecting = false;
     }
 
-
+    // Do MDNS stuff
     MDNS.update();
 
-    srvHTTP.handleClient();
+    if (haveRSAKeyCert) {
+      BearSSL::WiFiClientSecure client = srvGemini.available();
+      if (client) {
+        // LED on
+        digitalWrite(LED, HIGH ^ LEDinv);
 
-    BearSSL::WiFiClientSecure client = srvGemini.available();
-    if (client) {
-      // LED on
-      digitalWrite(LED, HIGH ^ LEDinv);
+        //std::vector<uint16_t> cyphers = { BR_TLS_RSA_WITH_AES_256_CBC_SHA256, BR_TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA, BR_TLS_RSA_WITH_3DES_EDE_CBC_SHA };
+        //client.setCiphers(cyphers);
 
-      //std::vector<uint16_t> cyphers = { BR_TLS_RSA_WITH_AES_256_CBC_SHA256, BR_TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA, BR_TLS_RSA_WITH_3DES_EDE_CBC_SHA };
-      //client.setCiphers(cyphers);
+        //client.setFingerprint("39b2204993bab61373aed82c24a20919b4bb7a9fb6c9342452b3e5f6836848de");
 
-      //client.setFingerprint("39b2204993bab61373aed82c24a20919b4bb7a9fb6c9342452b3e5f6836848de");
-
-      // Handle the client
-      clGemini(&client);
-      // LED off
-      digitalWrite(LED, LOW ^ LEDinv);
+        // Handle the client
+        clGemini(&client);
+        // LED off
+        digitalWrite(LED, LOW ^ LEDinv);
+      }
     }
 
     WiFiClient spartan = srvSpartan.available();
@@ -1005,13 +1021,26 @@ void loop() {
       digitalWrite(LED, LOW ^ LEDinv);
     }
 
+    WiFiClient http = srvHTTP.available();
+    if (http) {
+      // LED on
+      digitalWrite(LED, HIGH ^ LEDinv);
+      // Handle the client
+      clHTTP(&http);
+      // LED off
+      digitalWrite(LED, LOW ^ LEDinv);
+    }
+
   }
   else {
     Serial.println(F("WFI: WiFi disconnected"));
     MDNS.end();
-    srvGemini.stop();
+    if (haveRSAKeyCert)
+      srvGemini.stop();
+    srvSpartan.stop();
+    srvGopher.stop();
     srvHTTP.stop();
-    reconn = true;
+    reconnecting = true;
   }
 
 #ifdef USE_UPNP
