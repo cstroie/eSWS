@@ -489,6 +489,8 @@ int cpioSendDir(Stream *client, File dir) {
     else if (entry.isDirectory())
       // Recurse into directory
       outSize += cpioSendDir(client, entry);
+    // Close the file
+    entry.close();
   }
   // Return the output size
   return outSize;
@@ -504,7 +506,7 @@ int cpioSendArchive(Stream * client, proto_t proto, char *path) {
       else if (proto == SPARTAN)  client->print("4 ");
       else if (proto == HTTP)     client->print(F("HTTP/1.0 404 "));
       client->print(F("File not found\r\n"));
-      if      (proto == HTTP)     client->print(F("\r\n"));
+      if      (proto == HTTP)     client->print(F("Connection: close\r\n\r\n"));
     }
     return 0;
   }
@@ -512,15 +514,16 @@ int cpioSendArchive(Stream * client, proto_t proto, char *path) {
   if (proto != GOPHER) {
     if      (proto == GEMINI)   client->print("20 ");
     else if (proto == SPARTAN)  client->print("2 ");
-    else if (proto == HTTP)     client->print(F("HTTP/1.0 200 OK\r\nContent - Type: "));
+    else if (proto == HTTP)     client->print(F("HTTP/1.0 200 OK\r\nContent-Type: "));
     client->print(binMimeType);
     client->print(F("\r\n"));
-    if      (proto == HTTP)     client->print(F("\r\n"));
+    if      (proto == HTTP)     client->print(F("Connection: close\r\n\r\n"));
   }
   // Open the directory
   File dir = SD.open(path);
   // Send its content
   outSize += cpioSendDir(client, dir);
+  dir.close();
   // Write the TRAILER
   client->write("070701", 6);
   for (int i = 88; i > 0; i--)
@@ -537,18 +540,18 @@ int cpioSendArchive(Stream * client, proto_t proto, char *path) {
 }
 
 
-int sendFile(Stream * client, proto_t proto, char *pHost, char *pPath, char *pExt, const char *pFile) {
+int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt, const char *pFile) {
   int fileSize = 0;
   int dirEnd = 0;
   // Validate the path (.. /./ //)
   if (strstr(pPath, "..") != NULL or
       strstr(pPath, "/./") != NULL or
       strstr(pPath, "//") != NULL) {
-    if (proto == GEMINI)
-      client->print("59");
-    else if (proto == SPARTAN)
-      client->print("4");
+    if      (proto == GEMINI)   client->print("59");
+    else if (proto == SPARTAN)  client->print("4");
+    else if (proto == HTTP)     client->print(F("HTTP/1.0 500"));
     client->print(" Invalid path\r\n");
+    if      (proto == HTTP)     client->print(F("Connection: close\r\n\r\n"));
     return 0;
   }
   // Virtual hosting
@@ -562,7 +565,7 @@ int sendFile(Stream * client, proto_t proto, char *pHost, char *pPath, char *pEx
   strcpy(filePath, "/");
   // Check if the hostname and request host are the same and append the host
   if (pHost == NULL)
-    // No host in request (Gopher)
+    // No host in request (Gopher, HTTP/1.0)
     strcat(filePath, fqdn);
   else if (strncmp(host, pHost, strlen(host)) == 0 and strncmp(&pHost[strlen(host)], ".local", 6) == 0)
     // Host for .local
@@ -593,9 +596,6 @@ int sendFile(Stream * client, proto_t proto, char *pHost, char *pPath, char *pEx
     file = SD.open(filePath, "r");
   };
 
-  //Serial.print(F("DBG: File path: "));
-  //Serial.println(filePath);
-
   // Check if the file exists
   if (file.isFile()) {
     // Keep the size
@@ -605,12 +605,12 @@ int sendFile(Stream * client, proto_t proto, char *pHost, char *pPath, char *pEx
     if (proto != GOPHER) {
       if (pExt == NULL) {
         // No file extension
-        if (proto == GEMINI) client->print("20 ");
-        else if (proto == SPARTAN) client->print("2 ");
-        else if (proto == HTTP) client->print(F("HTTP/1.0 200 OK\r\nContent - Type: "));
+        if      (proto == GEMINI)   client->print("20 ");
+        else if (proto == SPARTAN)  client->print("2 ");
+        else if (proto == HTTP)     client->print(F("HTTP/1.0 200 OK\r\nContent-Type: "));
         client->print(binMimeType);
         client->print(F("\r\n"));
-        if (proto == HTTP) client->print(F("\r\n"));
+        if      (proto == HTTP)     client->print(F("Connection: close\r\n\r\n"));
       }
       else {
         // Extension found
@@ -626,16 +626,12 @@ int sendFile(Stream * client, proto_t proto, char *pHost, char *pPath, char *pEx
         if (mimetype == NULL)
           mimetype = binMimeType;
         // Send header, with one extra new line for HTTP
-        if (proto == GEMINI)
-          client->print("20 ");
-        else if (proto == SPARTAN)
-          client->print("2 ");
-        else if (proto == HTTP)
-          client->print(F("HTTP/1.0 200 OK\r\nContent - Type: "));
+        if      (proto == GEMINI)   client->print("20 ");
+        else if (proto == SPARTAN)  client->print("2 ");
+        else if (proto == HTTP)     client->print(F("HTTP/1.0 200 OK\r\nContent-Type: "));
         client->print(mimetype);
         client->print(F("\r\n"));
-        if (proto == HTTP)
-          client->print(F("\r\n"));
+        if      (proto == HTTP)     client->print(F("Connection: close\r\n\r\n"));
       }
     }
     // Send content
@@ -671,7 +667,7 @@ int sendFile(Stream * client, proto_t proto, char *pHost, char *pPath, char *pEx
         client->print(pPath);
         client->print("\r\n\r\n");
       case HTTP:
-        client->print(F("HTTP/1.0 200 OK\r\nContent - Type: text/plain\r\n\r\n"));
+        client->print(F("HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\n"));
         client->print("Content of ");
         client->print(pPath);
         client->print("\r\n\r\n");
@@ -778,11 +774,12 @@ int sendFile(Stream * client, proto_t proto, char *pHost, char *pPath, char *pEx
     fileSize = cpioSendArchive(client, proto, fqdn);
   }
   else {
+    // File not found
     if      (proto == GEMINI)   client->print("51 ");
     else if (proto == SPARTAN)  client->print("4 ");
     else if (proto == HTTP)     client->print(F("HTTP/1.0 404 "));
     client->print(F("File not found\r\n"));
-    if      (proto == HTTP)     client->print(F("\r\n"));
+    if      (proto == HTTP)     client->print(F("Connection: close\r\n\r\n"));
   }
   // Destroy the file path string
   delete (filePath);
@@ -1053,7 +1050,8 @@ void clGopher(WiFiClient * client) {
 }
 
 // Handle HTTP protocol
-void clHTTP(WiFiClient * client) {
+void clHTTP(WiFiClient *client) {
+  char *pMethod, *pPath, *pExt, *pQuery, *pProto, *pEOL;
   // Prepare the log
   getLocalTime(&logTime);
   logErrCode = 200;
@@ -1071,12 +1069,62 @@ void clHTTP(WiFiClient * client) {
     while (client->available())
       client->read();
 
+    // The buffer has at least 2 chars (CR LF) if no error
+    if (len >= 2) {
+      // Set EOL at CRLF chars
+      pEOL = &buf[len - 2];
+      // Trim the string
+      pEOL[0] = '\0';
+    }
+
     // Print the first part of the log line
     logPrint(client->remoteIP());
 
-    client->print(F("HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\nHi, Bob!"));
-    // FIXME
-    fileSize = 0;
+    // Check if the buffer was overflown
+    if (len < 0) {
+      logErrCode = 500;
+      client->print("HTTP/1.0 500 Invalid request\r\n");
+      break;
+    }
+
+    // Analyze the request
+    // TODO Reject unsupported methods
+    pMethod = buf;
+    // Find the path
+    pPath = strchr(pMethod, ' ');
+    if (pPath == NULL) {
+      logErrCode = 500;
+      client->print("HTTP/1.0 500 Invalid request\r\n");
+      break;
+    }
+    else {
+      pPath[0] = '\0';
+      pPath++;
+    }
+    // Find the proto
+    pProto = strchr(pPath, ' ');
+    if (pProto == NULL) {
+      logErrCode = 500;
+      client->print("HTTP/1.0 500 Invalid request\r\n");
+      break;
+    }
+    else {
+      pProto[0] = '\0';
+      pProto++;
+    }
+    // Find the query
+    pQuery = strchr(pPath, '?');
+    if (pQuery != NULL) {
+      pQuery[0] = '\0';
+      pQuery++;
+    }
+    else
+      pQuery = pEOL;
+
+    // Send the requested file or the generated response
+    fileSize = sendFile(client, HTTP, NULL, pPath, pExt, "index.gmi");
+    // We can now safely break the loop
+    break;
   }
   // Print final log part
   logPrint(logErrCode, fileSize);
@@ -1293,7 +1341,6 @@ void loop() {
       // LED off
       digitalWrite(LED, LOW ^ LEDinv);
     }
-
   }
   else {
     Serial.println(F("WFI: WiFi disconnected"));
