@@ -584,7 +584,7 @@ int cpioSendDir(Stream *client, File dir) {
 // Send a simple ascii CPIO archive with card contents
 int cpioSendArchive(Stream * client, proto_t proto, char *path) {
   int outSize = 0;
-  // Check the directory exists
+  // Check the path exists
   if (!SD.exists(path)) {
     logErrCode = sendHeader(client, proto, ST_NOTFOUND, "File not found");
     return 0;
@@ -608,6 +608,129 @@ int cpioSendArchive(Stream * client, proto_t proto, char *path) {
   // Write the pad after file content
   client->write("\0\0\0\0", pad);
   // Return the archive size
+  return outSize;
+}
+
+// Send a gemini feed
+int sendFeed(Stream * client, proto_t proto, char *path, char *fsPath) {
+  int outSize = 0;
+  int len;
+  time_t modTime;
+  struct tm* stTime;
+  char title[100];
+  char *pTitle;
+  // Check the directory exists
+  if (!SD.exists(fsPath)) {
+    logErrCode = sendHeader(client, proto, ST_NOTFOUND, "File not found");
+    return 0;
+  }
+  // Find the requested file name
+  char *pName = strrchr(path, '/');
+  // Trim the path at this position
+  pName[0] = '\0';
+  // Start with the header
+  logErrCode = sendHeader(client, proto, ST_OK, "text/gemini");
+
+  // Use the 'index.gmi' file, if any, to get the title
+  char *indexPath = new char[strlen(fsPath) + 20];
+  strcpy(indexPath, fsPath);
+  strcat(indexPath, "/index.gmi");
+  File index = SD.open(indexPath);
+  if (index.isFile()) {
+    // Read the first non empty line from the file
+    while (true) {
+      // Read one line from file
+      len = readln(&index, title, 95);
+      // If non empty, break
+      if (len != 0) break;
+    }
+    // Line too long, trim it
+    if (len == -1) {
+      strcpy(&title[95], " ...");
+      len = 99;
+    }
+    if (title[0] != '#')
+      outSize += client->print("# ");
+    outSize += client->print(title);
+  }
+  else
+    outSize += client->print("# Feed");
+  index.close();
+  delete(indexPath);
+  outSize += client->print("\r\n\r\n");
+
+  // List files in the specified path
+  File root = SD.open(fsPath);
+  while (File entry = root.openNextFile()) {
+    // Ignore directories, hidden and index files
+    if (entry.isDirectory() or                        // directories
+        entry.name()[0] == '.' or                     // hidden files
+        strncmp(entry.name(), "index.", 6) == 0 or    // index
+        strncmp(entry.name(), "gopher.", 7) == 0 or   // gopher map
+        strspn(entry.name(), "1234567890") < 2)       // needs to start with 2 digits
+      continue;
+    // Get the last modified time
+    time_t modTime = entry.getLastWrite();
+    stTime = localtime(&modTime);
+
+    // Read the first non empty line from the file
+    while (true) {
+      // Read one line from file
+      len = readln(&entry, title, 95);
+      // If non empty, break
+      if (len != 0) break;
+    }
+    // Line too long, trim it
+    if (len == -1) {
+      strcpy(&title[95], " ...");
+      len = 99;
+    }
+    pTitle = &title[0];
+    if (len > 0)
+      // Remove starting '# '
+      pTitle = &title[strspn(title, "# \t")];
+    else
+      // Just use the file name
+      strcpy(title, entry.name());
+
+    // Different for different protocols
+    switch (proto) {
+      case GOPHER: {
+          char gPath[200];
+          if (path[0] != '/') {
+            strcpy(gPath, "/");
+            strcat(gPath, path);
+          }
+          else {
+            strcpy(gPath, path);
+          }
+          strcat(gPath, "/");
+          strcat(path, entry.name());
+          // Write the line
+          outSize += sendGopherMapLine(client, '0', gPath, pTitle, NULL, fqdn);
+        }
+        break;
+      case GEMINI:
+      case SPARTAN:
+      case HTTP:
+        outSize += client->printf("=> %s/%s\t%d-%02d-%02d %s\r\n", path, entry.name(), (stTime->tm_year) + 1900, (stTime->tm_mon) + 1, stTime->tm_mday, pTitle);
+        break;
+    }
+    entry.close();
+  }
+  root.close();
+
+
+
+
+
+
+
+
+  outSize += client->print("\r\n");
+  // Restore the path
+  pName[0] = '/';
+  // Return the feed size
   return outSize;
 }
 
@@ -643,6 +766,7 @@ int sendStatusPage(Stream *client) {
 int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt, const char *pFile) {
   int fileSize = 0;
   int dirEnd = 0;
+  char *pFName;
   // Validate the path (.. /./ //)
   if (strstr(pPath, "..") != NULL or
       strstr(pPath, "/./") != NULL or
@@ -650,7 +774,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
     logErrCode = sendHeader(client, proto, ST_INVALID, "Invalid path");
     return 0;
   }
-  // Virtual hosting
+  // Virtual hosting, find the server root directory
   int hostLen = strlen(fqdn);
   // Find the longest host name
   if (pHost != NULL)
@@ -691,13 +815,16 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
     strcat(filePath, pFile);
     file = SD.open(filePath, "r");
   };
+  // Find the requested file name in filesystem path
+  pFName = strrchr(filePath, '/');
+  // Find the extension
+  pExt = strrchr(pFName, '.');
 
   // Check if the file exists
   if (file.isFile()) {
     // Keep the size
     fileSize = file.size();
     // Detect mime type
-    pExt = strrchr(filePath, '.');
     if (proto != GOPHER) {
       if (pExt == NULL)
         // No file extension
@@ -808,11 +935,26 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
     }
   }
   else if (strcmp(pPath, "/status.gmi") == 0 and proto == GEMINI) {
+    // Send the server status page
     fileSize = sendStatusPage(client);
   }
-  else if (strcmp(pPath, "/export.cpio") == 0) {
-    // Send the CPIO archive
-    fileSize = cpioSendArchive(client, proto, fqdn);
+  else if (strncmp(pExt, ".cpio", 5) == 0) {
+    // The requested virtual file is a CPIO archive. Trim the filepath
+    // to the file name and get the parent directory (it can also be a
+    // single file). Use it for archive root.
+    pFName[0] = '\0';
+    // Send the archive
+    fileSize = cpioSendArchive(client, proto, filePath);
+    // Restore the filePath
+    pFName[0] = '/';
+  }
+  else if (strncmp(pFName, "/feed.gmi", 9) == 0) {
+    // The requested virtual file is a gemini feed
+    pFName[0] = '\0';
+    // Send the feed
+    fileSize = sendFeed(client, proto, pPath, filePath);
+    // Restore the filePath
+    pFName[0] = '/';
   }
   else
     // File not found
