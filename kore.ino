@@ -34,6 +34,7 @@
 #define WIFI_CFG "/wifi.cfg"
 #define HOSTNAME "/hostname.cfg"
 #define DDNS_TOK "/duckdns.cfg"
+#define TZ_CFG "/tz.cfg"
 
 // Mime types
 #define MIMETYPE "/mimetype.cfg"
@@ -121,6 +122,7 @@ WiFiServer srvGopher(70);
 char *host;
 char *fqdn;
 char *ddns;
+char *tz;
 char *ssid;
 char *pass;
 char buf[1025];
@@ -290,6 +292,28 @@ void loadDuckDNS() {
   file.close();
 }
 
+// Load timezone configuration
+void loadTimeZone() {
+  int len = 1024;
+  // Read the timezone configuration
+  Serial.print(F("NTP: Reading timezone configuration from "));
+  Serial.print(TZ_CFG);
+  Serial.print(F(" ... "));
+  File file = SD.open(TZ_CFG, "r");
+  if (file.isFile()) {
+    len = file.read((uint8_t *)buf, 255);
+    char *token = strtok(buf, "\t\r\n");
+    if (token != NULL) {
+      tz = new char[strlen(token) + 1];
+      strcpy(tz, token);
+      Serial.println(tz);
+    }
+  }
+  else
+    Serial.println(F("failed."));
+  file.close();
+}
+
 // Load WiFi configuration
 void initWiFi() {
   int len = 1024;
@@ -380,7 +404,7 @@ void setClock() {
   const char *TZstr = "EET-2EEST,M3.5.0/3,M10.5.0/4";
   //configTime(3 * 3600, 0, "pool.ntp.org", "time.nist.gov");
 
-  configTime(TZ_Europe_Bucharest, "pool.ntp.org", "time.nist.gov");
+  configTime(tz, "pool.ntp.org", "time.nist.gov");
 
   /*
     sntp_stop();
@@ -452,7 +476,7 @@ unsigned long uptime(char *buf, size_t len) {
 
 
 // Send the proper header according to protocol and return the real status
-int sendHeader(Stream *client, proto_t proto, status_t status, char *pText) {
+int sendHeader(Stream *client, proto_t proto, status_t status, const char *pText) {
   switch (proto) {
     case GEMINI:
     case SPARTAN:
@@ -485,7 +509,7 @@ int sendHeader(Stream *client, proto_t proto, status_t status, char *pText) {
 }
 
 // Send one gophermap line
-int sendGopherMapLine(Stream *client, char gType = 'i', char *gPath = NULL, char *gText1 = NULL, char *gText2 = NULL, char *gServer = NULL, int gPort = 70) {
+int sendGopherMapLine(Stream *client, char gType = 'i', const char *gPath = NULL, const char *gText1 = NULL, const char *gText2 = NULL, const char *gServer = NULL, int gPort = 70) {
   int outSize = 0;
   outSize += client->print(gType);
   if (gText1 != NULL)
@@ -1213,6 +1237,8 @@ void setup() {
 #if defined(USE_CACHE)
   srvGemini.setCache(&sslCache);
 #endif
+  // Load time zone configuration
+  loadTimeZone();
 }
 
 // Main Arduino loop
@@ -1299,7 +1325,7 @@ void loop() {
     MDNS.update();
 
     if (haveRSAKeyCert) {
-      BearSSL::WiFiClientSecure client = srvGemini.available();
+      BearSSL::WiFiClientSecure client = srvGemini.accept();
       if (client) {
         // LED on
         digitalWrite(LED, HIGH ^ LEDinv);
@@ -1316,7 +1342,7 @@ void loop() {
       }
     }
 
-    WiFiClient spartan = srvSpartan.available();
+    WiFiClient spartan = srvSpartan.accept();
     if (spartan) {
       // LED on
       digitalWrite(LED, HIGH ^ LEDinv);
@@ -1326,7 +1352,7 @@ void loop() {
       digitalWrite(LED, LOW ^ LEDinv);
     }
 
-    WiFiClient gopher = srvGopher.available();
+    WiFiClient gopher = srvGopher.accept();
     if (gopher) {
       // LED on
       digitalWrite(LED, HIGH ^ LEDinv);
@@ -1336,7 +1362,7 @@ void loop() {
       digitalWrite(LED, LOW ^ LEDinv);
     }
 
-    WiFiClient http = srvHTTP.available();
+    WiFiClient http = srvHTTP.accept();
     if (http) {
       // LED on
       digitalWrite(LED, HIGH ^ LEDinv);
