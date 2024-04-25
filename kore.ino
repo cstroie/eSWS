@@ -72,16 +72,20 @@ ESP8266WiFiMulti wifiMulti;
 
 // SD card CS pins
 int spiCS = -1;
-int spiCSPins[] = { D4, D8, D1, D2, D3, D0 };
+int spiCSPins[] = {D4, D8, D1, D2, D3, D0};
 
 
 
 // Protocols
-enum proto_t { GEMINI,
-               SPARTAN,
-               GOPHER,
-               HTTP
-             };
+enum proto_t {GEMINI, SPARTAN, HTTP, GOPHER, _PROTO_ALL};
+// Pseudo-statuses
+enum status_t {ST_OK, ST_INPUT, ST_NOTFOUND, ST_INVALID, ST_SERVERERROR, _ST_ALL};
+int rspStatus[_PROTO_ALL][_ST_ALL] = {
+  {20, 10, 51, 59, 59},
+  {2, 2, 4, 4, 5},
+  {200, 200, 404, 500, 500},
+  {0, 0, 0, 0, 0}
+};
 
 // TLS server
 // openssl req -new -x509 -keyout key.pem -out crt.pem -days 3650 -nodes -subj "/C=RO/ST=Bucharest/L=Bucharest/O=Eridu/OU=IT/CN=koremoon.duckdns.org" -addext "subjectAltName=DNS:eridu.eu.org,DNS:kore.eridu.eu.org,DNS:koremoon.duckdns.org,DNS:*.koremoon.duckdns.org,DNS:koremoon.localDNS:kore.local,DNS:localhost"
@@ -446,6 +450,63 @@ unsigned long uptime(char *buf, size_t len) {
   return upt;
 }
 
+
+// Send the proper header according to protocol and return the real status
+int sendHeader(Stream *client, proto_t proto, status_t status, char *pText) {
+  switch (proto) {
+    case GEMINI:
+    case SPARTAN:
+      client->print(rspStatus[proto][status]);
+      client->print(" ");
+      client->print(pText);
+      client->print("\r\n");
+      break;
+    case HTTP:
+      client->print(F("HTTP/1.0 "));
+      client->print(rspStatus[proto][status]);
+      client->print(" ");
+      if (status == ST_OK) {
+        client->print(F("OK"));
+        client->print(F("\r\nContent-Type: "));
+        client->print(pText);
+        client->print(F("; encoding=utf8"));
+      }
+      else
+        client->print(pText);
+      client->print("\r\nConnection: close\r\n\r\n");
+      break;
+    case GOPHER:
+      client->print(pText);
+      client->print("\r\n");
+      break;
+  }
+  // Return the status code
+  return rspStatus[proto][status];
+}
+
+// Send one gophermap line
+int sendGopherMapLine(Stream *client, char gType = 'i', char *gPath = NULL, char *gText1 = NULL, char *gText2 = NULL, char *gServer = NULL, int gPort = 70) {
+  int outSize = 0;
+  outSize += client->print(gType);
+  if (gText1 != NULL)
+    outSize += client->print(gText1);
+  if (gText2 != NULL)
+    outSize += client->print(gText2);
+  outSize += client->print("\t");
+  if (gPath != NULL)
+    outSize += client->print(gPath);
+  outSize += client->print("\t");
+  if (gServer != NULL)
+    outSize += client->print(gServer);
+  else
+    outSize += client->print("null");
+  outSize += client->print("\t");
+  outSize += client->print(gPort);
+  outSize += client->print("\r\n");
+  // Return the output size
+  return outSize ;
+}
+
 // Send a file in CPIO arhive
 int cpioSendFile(Stream *client, File file) {
   int outSize = 0;
@@ -501,24 +562,11 @@ int cpioSendArchive(Stream * client, proto_t proto, char *path) {
   int outSize = 0;
   // Check the directory exists
   if (!SD.exists(path)) {
-    if (proto != GOPHER) {
-      if      (proto == GEMINI)   client->print("51 ");
-      else if (proto == SPARTAN)  client->print("4 ");
-      else if (proto == HTTP)     client->print(F("HTTP/1.0 404 "));
-      client->print(F("File not found\r\n"));
-      if      (proto == HTTP)     client->print(F("Connection: close\r\n\r\n"));
-    }
+    logErrCode = sendHeader(client, proto, ST_NOTFOUND, "File not found");
     return 0;
   }
   // Start with the header
-  if (proto != GOPHER) {
-    if      (proto == GEMINI)   client->print("20 ");
-    else if (proto == SPARTAN)  client->print("2 ");
-    else if (proto == HTTP)     client->print(F("HTTP/1.0 200 OK\r\nContent-Type: "));
-    client->print(binMimeType);
-    client->print(F("\r\n"));
-    if      (proto == HTTP)     client->print(F("Connection: close\r\n\r\n"));
-  }
+  logErrCode = sendHeader(client, proto, ST_OK, binMimeType);
   // Open the directory
   File dir = SD.open(path);
   // Send its content
@@ -539,6 +587,34 @@ int cpioSendArchive(Stream * client, proto_t proto, char *path) {
   return outSize;
 }
 
+// Send the virtual server status page
+int sendStatusPage(Stream *client) {
+  int fileSize = 0;
+  logErrCode = sendHeader(client, GEMINI, ST_OK, "text/gemini");
+  fileSize += client->print("# Server status\r\n\r\n");
+  // Hostname
+  fileSize += client->print(fqdn);
+  fileSize += client->print("\t");
+  fileSize += client->print(host);
+  fileSize += client->print(".local\r\n\r\n");
+  // Uptime in seconds and text
+  unsigned long ups = 0;
+  char upt[32] = "";
+  ups = uptime(upt, sizeof(upt));
+  fileSize += client->print("Uptime: "); fileSize += client->print(upt); fileSize += client->print("\r\n");
+  // SSID
+  fileSize += client->print("SSID: "); fileSize += client->print(WiFi.SSID()); fileSize += client->print("\r\n");
+  // Get RSSI
+  fileSize += client->print("Signal: "); fileSize += client->print(WiFi.RSSI()); fileSize += client->print(" dBm\r\n");
+  // IP address
+  fileSize += client->print("IP address: "); fileSize += client->print(WiFi.localIP()); fileSize += client->print("\r\n");
+  // Free Heap
+  fileSize += client->print("Free memory: "); fileSize += client->print(ESP.getFreeHeap()); fileSize += client->print(" bytes\r\n");
+  // Read the Vcc (mV)
+  fileSize += client->print("Voltage: "); fileSize += client->print(ESP.getVcc()); fileSize += client->print(" mV\r\n");
+  // Return the file size
+  return fileSize;
+}
 
 int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt, const char *pFile) {
   int fileSize = 0;
@@ -547,11 +623,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
   if (strstr(pPath, "..") != NULL or
       strstr(pPath, "/./") != NULL or
       strstr(pPath, "//") != NULL) {
-    if      (proto == GEMINI)   client->print("59");
-    else if (proto == SPARTAN)  client->print("4");
-    else if (proto == HTTP)     client->print(F("HTTP/1.0 500"));
-    client->print(" Invalid path\r\n");
-    if      (proto == HTTP)     client->print(F("Connection: close\r\n\r\n"));
+    logErrCode = sendHeader(client, proto, ST_INVALID, "Invalid path");
     return 0;
   }
   // Virtual hosting
@@ -603,15 +675,9 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
     // Detect mime type
     pExt = strrchr(filePath, '.');
     if (proto != GOPHER) {
-      if (pExt == NULL) {
+      if (pExt == NULL)
         // No file extension
-        if      (proto == GEMINI)   client->print("20 ");
-        else if (proto == SPARTAN)  client->print("2 ");
-        else if (proto == HTTP)     client->print(F("HTTP/1.0 200 OK\r\nContent-Type: "));
-        client->print(binMimeType);
-        client->print(F("\r\n"));
-        if      (proto == HTTP)     client->print(F("Connection: close\r\n\r\n"));
-      }
+        logErrCode = sendHeader(client, proto, ST_OK, binMimeType);
       else {
         // Extension found
         pExt++;
@@ -625,13 +691,8 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
         }
         if (mimetype == NULL)
           mimetype = binMimeType;
-        // Send header, with one extra new line for HTTP
-        if      (proto == GEMINI)   client->print("20 ");
-        else if (proto == SPARTAN)  client->print("2 ");
-        else if (proto == HTTP)     client->print(F("HTTP/1.0 200 OK\r\nContent-Type: "));
-        client->print(mimetype);
-        client->print(F("\r\n"));
-        if      (proto == HTTP)     client->print(F("Connection: close\r\n\r\n"));
+        // Send header
+        logErrCode = sendHeader(client, proto, ST_OK, mimetype);
       }
     }
     // Send content
@@ -650,27 +711,16 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
     // Send the response
     switch (proto) {
       case GOPHER:
-        client->print("iContent of ");
-        client->print(pPath);
-        client->print("\t\tnull\t1\r\n");
-        client->print("i\t\tnull\t1\r\n");
-        break;
-      case SPARTAN:
-        client->print("2 text/gemini\r\n");
-        client->print("# Content of ");
-        client->print(pPath);
-        client->print("\r\n\r\n");
+        fileSize += sendGopherMapLine(client, 'i', NULL, "Content of ", pPath);
+        fileSize += sendGopherMapLine(client, 'i');
         break;
       case GEMINI:
-        client->print("20 text/gemini\r\n");
-        client->print("# Content of ");
-        client->print(pPath);
-        client->print("\r\n\r\n");
+      case SPARTAN:
       case HTTP:
-        client->print(F("HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\n"));
-        client->print("Content of ");
-        client->print(pPath);
-        client->print("\r\n\r\n");
+        logErrCode = sendHeader(client, proto, ST_OK, "text/gemini");
+        fileSize += client->print("# Content of ");
+        fileSize += client->print(pPath);
+        fileSize += client->print("\r\n\r\n");
         break;
     }
     // List files in SD
@@ -680,107 +730,69 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
       if (entry.name()[0] == '.') continue;
       // Different for different protocols
       switch (proto) {
-        case GOPHER:
-          if (entry.isDirectory())
-            client->print("1");
-          else {
-            // Detect type type
-            pExt = strrchr(entry.name(), '.');
-            if (pExt == NULL)
-              // No file extension
-              client->print("9");
+        case GOPHER: {
+            char gType = '9';
+            char gPath[200];
+            if (entry.isDirectory())
+              gType = '1';
             else {
-              // Extension found
-              pExt++;
-              // Find the type
-              char gph = '9';
-              for (auto entry : mtList) {
-                if (strncmp(entry.ext, pExt, 3) == 0) {
-                  gph = entry.gph;
-                  break;
+              // Detect type type
+              pExt = strrchr(entry.name(), '.');
+              if (pExt != NULL) {
+                // Extension found
+                pExt++;
+                // Find the type
+                for (auto entry : mtList) {
+                  if (strncmp(entry.ext, pExt, 3) == 0) {
+                    gType = entry.gph;
+                    break;
+                  }
                 }
               }
-              client->print(gph);
             }
+            if (pPath[0] != '/') {
+              strcpy(gPath, "/");
+              strcat(gPath, pPath);
+            }
+            else {
+              strcpy(gPath, pPath);
+            }
+            if (strlen(pPath) > 1 and pPath[strlen(pPath) - 1] != '/')
+              strcat(gPath, "/");
+            strcat(gPath, entry.name());
+            if (entry.isDirectory())
+              strcat(gPath, "/");
+            // Write the line
+            fileSize += sendGopherMapLine(client, gType, gPath, (char*)entry.name(), NULL, fqdn);
           }
-          client->print(entry.name());
-          client->print("\t");
-          if (pPath[0] != '/')
-            client->print("/");
-          client->print(pPath);
-          if (strlen(pPath) > 1 and pPath[strlen(pPath) - 1] != '/')
-            client->print("/");
-          client->print(entry.name());
-          if (entry.isDirectory())
-            client->print("/");
-          client->print("\t");
-          client->print(pHost);
-          client->print("\t70\r\n");
           break;
-        case HTTP:
-        case SPARTAN:
         case GEMINI:
-          client->print(" => ");
-          client->print(pPath);
+        case SPARTAN:
+        case HTTP:
+          fileSize += client->print("=> ");
+          fileSize += client->print(pPath);
           if (strlen(pPath) > 1 and pPath[strlen(pPath) - 1] != '/')
-            client->print("/");
-          client->print(entry.name());
-          client->print("\t");
-          client->print(entry.name());
+            fileSize += client->print("/");
+          fileSize += client->print(entry.name());
           if (entry.isDirectory())
-            client->print("/");
-          client->print("\r\n");
+            fileSize += client->print("/");
+          fileSize += client->print("\t");
+          fileSize += client->print(entry.name());
+          fileSize += client->print("\r\n");
+          break;
       }
     }
   }
   else if (strcmp(pPath, "/status.gmi") == 0 and proto == GEMINI) {
-    client->print("20 text/gemini\r\n");
-    client->print("# Server status\r\n\r\n");
-    // Hostname
-    client->print(fqdn);
-    client->print("\t");
-    client->print(host);
-    client->print(".local\r\n\r\n");
-    // Uptime in seconds and text
-    unsigned long ups = 0;
-    char upt[32] = "";
-    ups = uptime(upt, sizeof(upt));
-    client->print("Uptime: ");
-    client->print(upt);
-    client->print("\r\n");
-    // SSID
-    client->print("SSID: ");
-    client->print(WiFi.SSID());
-    client->print("\r\n");
-    // Get RSSI
-    client->print("Signal: ");
-    client->print(WiFi.RSSI());
-    client->print(" dBm\r\n");
-    // IP address
-    client->print("IP address: ");
-    client->print(WiFi.localIP());
-    client->print("\r\n");
-    // Free Heap
-    client->print("Free memory: ");
-    client->print(ESP.getFreeHeap());
-    client->print(" bytes\r\n");
-    // Read the Vcc (mV)
-    client->print("Voltage: ");
-    client->print(ESP.getVcc());
-    client->print(" mV\r\n");
+    fileSize = sendStatusPage(client);
   }
   else if (strcmp(pPath, "/export.cpio") == 0) {
     // Send the CPIO archive
     fileSize = cpioSendArchive(client, proto, fqdn);
   }
-  else {
+  else
     // File not found
-    if      (proto == GEMINI)   client->print("51 ");
-    else if (proto == SPARTAN)  client->print("4 ");
-    else if (proto == HTTP)     client->print(F("HTTP/1.0 404 "));
-    client->print(F("File not found\r\n"));
-    if      (proto == HTTP)     client->print(F("Connection: close\r\n\r\n"));
-  }
+    logErrCode = sendHeader(client, proto, ST_NOTFOUND, "File not found");
   // Destroy the file path string
   delete (filePath);
   // Return the file size
@@ -836,15 +848,13 @@ void clGemini(BearSSL::WiFiClientSecure * client) {
 
     // Check if the buffer was overflown
     if (len < 0) {
-      logErrCode = 59;
-      client->print("59 Invalid URL\r\n");
+      logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Invalid URL");
       break;
     }
 
     // Find the schema
     if (strncmp(buf, "gemini://", 9) != 0) {
-      logErrCode = 59;
-      client->print("59 Unsupported protocol\r\n");
+      logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Unsupported protocol");
       break;
     }
 
@@ -933,8 +943,7 @@ void clSpartan(WiFiClient * client) {
 
     // Check if the buffer was overflown
     if (len < 0) {
-      logErrCode = 4;
-      client->print("4 Invalid request\r\n");
+      logErrCode = sendHeader(client, SPARTAN, ST_INVALID, "Invalid request");
       break;
     }
 
@@ -943,8 +952,7 @@ void clSpartan(WiFiClient * client) {
     // Find the path
     pPath = strchr(pHost, ' ');
     if (pPath == NULL) {
-      logErrCode = 4;
-      client->print("4 Invalid request\r\n");
+      logErrCode = sendHeader(client, SPARTAN, ST_INVALID, "Invalid request");
       break;
     }
     else {
@@ -954,8 +962,7 @@ void clSpartan(WiFiClient * client) {
     // Find the length
     pLen = strchr(pPath, ' ');
     if (pLen == NULL) {
-      logErrCode = 4;
-      client->print("4 Invalid request\r\n");
+      logErrCode = sendHeader(client, SPARTAN, ST_INVALID, "Invalid request");
       break;
     }
     else {
@@ -1082,8 +1089,7 @@ void clHTTP(WiFiClient *client) {
 
     // Check if the buffer was overflown
     if (len < 0) {
-      logErrCode = 500;
-      client->print("HTTP/1.0 500 Invalid request\r\n");
+      logErrCode = sendHeader(client, HTTP, ST_INVALID, "Invalid request");
       break;
     }
 
@@ -1093,8 +1099,7 @@ void clHTTP(WiFiClient *client) {
     // Find the path
     pPath = strchr(pMethod, ' ');
     if (pPath == NULL) {
-      logErrCode = 500;
-      client->print("HTTP/1.0 500 Invalid request\r\n");
+      logErrCode = sendHeader(client, HTTP, ST_INVALID, "Invalid request");
       break;
     }
     else {
@@ -1104,8 +1109,7 @@ void clHTTP(WiFiClient *client) {
     // Find the proto
     pProto = strchr(pPath, ' ');
     if (pProto == NULL) {
-      logErrCode = 500;
-      client->print("HTTP/1.0 500 Invalid request\r\n");
+      logErrCode = sendHeader(client, HTTP, ST_INVALID, "Invalid request");
       break;
     }
     else {
@@ -1246,9 +1250,9 @@ void loop() {
 #endif
 
       // Update DuckDNS
-      Serial.print(F("DNS: Updating DuckDNS for domain ... "));
+      Serial.print(F("DNS: Updating DuckDNS for domain \""));
       Serial.print(host);
-      Serial.print(F(" ... "));
+      Serial.print(F("\" ... "));
       bool updated = upDuckDNS(host, ddns);
       if (updated) Serial.println(F("done."));
       else Serial.println(F("failed."));
