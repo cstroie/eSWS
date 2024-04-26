@@ -80,12 +80,12 @@ int spiCSPins[] = {D4, D8, D1, D2, D3, D0};
 // Protocols
 enum proto_t {GEMINI, SPARTAN, HTTP, GOPHER, _PROTO_ALL};
 // Pseudo-statuses
-enum status_t {ST_OK, ST_INPUT, ST_NOTFOUND, ST_INVALID, ST_SERVERERROR, _ST_ALL};
+enum status_t {ST_OK, ST_INPUT, ST_REDIR, ST_NOTFOUND, ST_INVALID, ST_SERVERERROR, _ST_ALL};
 int rspStatus[_PROTO_ALL][_ST_ALL] = {
-  {20, 10, 51, 59, 59},
-  {2, 2, 4, 4, 5},
-  {200, 200, 404, 500, 500},
-  {0, 0, 0, 0, 0}
+  {20, 10, 30, 51, 59, 59},
+  {2, 2, 3, 4, 4, 5},
+  {200, 200, 200, 404, 500, 500},
+  {0, 0, 0, 0, 0, 0}
 };
 
 // TLS server
@@ -1002,6 +1002,7 @@ void logPrint(int code, int size) {
 // Handle Gemini protocol
 void clGemini(BearSSL::WiFiClientSecure * client) {
   char *pSchema, *pHost, *pPort, *pPath, *pExt, *pQuery, *pEOL;
+  bool titan = false;
   // Prepare the log
   getLocalTime(&logTime);
   logErrCode = 20;
@@ -1034,15 +1035,21 @@ void clGemini(BearSSL::WiFiClientSecure * client) {
     }
 
     // Find the schema
-    if (strncmp(buf, "gemini://", 9) != 0) {
+    if (strncmp(buf, "gemini://", 9) == 0)
+      titan = false;
+    else if (strncmp(buf, "titan://", 8) == 0)
+      titan = true;
+    else {
       logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Unsupported protocol");
       break;
     }
 
     // Decompose the request
     pSchema = buf;
-    pSchema[6] = '\0';
-    pHost = pSchema + 7;
+    // Find the host
+    pHost = strchr(pSchema, ':');
+    pHost[0] = '\0';
+    pHost++;
     // Move the host down 2 chars
     int i;
     for (i = 0; pHost[i + 2] != '/' and pHost[i + 2] != '?' and pHost[i + 2] != '\0'; i++)
@@ -1067,6 +1074,10 @@ void clGemini(BearSSL::WiFiClientSecure * client) {
     }
     // Find the query
     pQuery = strchr(pPath, '?');
+    if (pQuery == NULL) {
+      // Try to identify paramters, as used by titan
+      pQuery = strchr(pPath, ';');
+    }
     if (pQuery != NULL) {
       pQuery[0] = '\0';
       pQuery++;
@@ -1075,13 +1086,80 @@ void clGemini(BearSSL::WiFiClientSecure * client) {
       pQuery = pEOL;
 
     /*
-          Serial.print(F("Schema: ")); Serial.println(pSchema);
-          Serial.print(F("Host:   ")); Serial.println(pHost);
-          Serial.print(F("Port:   ")); Serial.println(pPort);
-          Serial.print(F("Path:   ")); Serial.println(pPath);
-          Serial.print(F("Query:  ")); Serial.println(pQuery);
+        Serial.println();
+        Serial.print(F("Schema: ")); Serial.println(pSchema);
+        Serial.print(F("Host:   ")); Serial.println(pHost);
+        Serial.print(F("Port:   ")); Serial.println(pPort);
+        Serial.print(F("Path:   ")); Serial.println(pPath);
+        Serial.print(F("Query:  ")); Serial.println(pQuery);
     */
 
+    // If the protocol is 'titan', we need to read the upcoming data. We will use the same buffer, after pEOL
+    if (titan) {
+      // Quick check the query
+      if (strlen(pQuery) <= 0) {
+        logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Invalid query fot titan");
+        break;
+      }
+      // We need to decompose the query and get mime, size and token
+      char *pKey, *pVal, *pMime, *pToken, *plData;
+      long int plSize;
+      // Get a fragment from query
+      pKey = strtok(pQuery, ";");
+      while (pKey != NULL) {
+        // Check if it has the form "key=value"
+        pVal = strchr(pKey, '=');
+        if (pVal != NULL) {
+          // Starting with the next char there is the value
+          pVal++;
+          if      (strncmp(pKey, "mime", 4) == 0) pMime = pVal;
+          else if (strncmp(pKey, "token", 5) == 0) pToken = pVal;
+          else if (strncmp(pKey, "size", 4) == 0) plSize = strtol(pVal, NULL, 10);
+        }
+        // Next fragment
+        pKey = strtok(NULL, ";");
+      }
+      // Check if the payload size is greater than zero
+      if (plSize <= 0) {
+        logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Invalid payload size");
+        break;
+      }
+      // Check the space we have
+      if ((1023 - len) > (int)plSize) {
+        // Read all the remaining data
+        plData = pEOL + 1;
+        int qLen = client->readBytes(plData, plSize);
+        // Check the read data lenght
+        if (qLen != plSize) {
+          logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Error reading payload");
+          break;
+        }
+        // Ensure a zero terminated string
+        plData[plSize] = '\0';
+      }
+      else {
+        // Insufficient space
+        logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Payload too large");
+        break;
+      }
+      // We have the payload
+      // XXX
+      Serial.println();
+      Serial.println(plData);
+      // Redirect to the same page using gemini schema
+      char *redir = new char[len + 1];
+      strcpy(redir, "gemini://");
+      strcat(redir, pHost);
+      if (pPort) {
+        strcat(redir, ":");
+        strcat(redir, pPort);
+      }
+      strcat(redir, pPath);
+      // Redirect
+      logErrCode = sendHeader(client, GEMINI, ST_REDIR, redir);
+      delete(redir);
+      break;
+    }
     // Send the requested file or the generated response
     fileSize = sendFile(client, GEMINI, pHost, pPath, pExt, pQuery, "index.gmi");
     // We can now safely break the loop
