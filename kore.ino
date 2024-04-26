@@ -776,7 +776,7 @@ int sendStatusPage(Stream *client) {
   return fileSize;
 }
 
-int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt, const char *pFile) {
+int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt, char *pQuery, const char *pFile) {
   int fileSize = 0;
   int dirEnd = 0;
   char *pFName;
@@ -834,7 +834,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
   pExt = strrchr(pFName, '.');
 
   // Check if the file exists
-  if (file.isFile()) {
+  if (file.isFile() and strcmp(pQuery, "nofile") != 0) {
     // Keep the size
     fileSize = file.size();
     // Detect mime type
@@ -963,7 +963,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
     // Restore the filePath
     pFName[0] = '/';
   }
-  else if (strncmp(pFName, "/feeds.gmi", 9) == 0) {
+  else if (strncmp(pFName, "/feed.gmi", 9) == 0) {
     // The requested virtual file is a gemini feed
     pFName[0] = '\0';
     // Send the feed
@@ -1083,7 +1083,7 @@ void clGemini(BearSSL::WiFiClientSecure * client) {
     */
 
     // Send the requested file or the generated response
-    fileSize = sendFile(client, GEMINI, pHost, pPath, pExt, "index.gmi");
+    fileSize = sendFile(client, GEMINI, pHost, pPath, pExt, pQuery, "index.gmi");
     // We can now safely break the loop
     break;
   }
@@ -1153,15 +1153,29 @@ void clSpartan(WiFiClient * client) {
       lQuery = strtol(pLen, NULL, 10);
     }
 
-    /*
-        Serial.print(F("Host: ")); Serial.println(pHost);
-        Serial.print(F("Path: ")); Serial.println(pPath);
-        Serial.print(F("Length: ")); Serial.println(lQuery);
-        Serial.print(F("Query: ")); Serial.println(pQuery);
-    */
-
+    // If there is any query, we need to read it. We will use the same buffer, after pEOL
+    if (lQuery > 0) {
+      // Check the space we have
+      if ((1023 - len) > lQuery) {
+        // Read all the remaining data
+        pQuery = pEOL + 1;
+        int qLen = client->readBytes(pQuery, lQuery);
+        // Check the read data lenght
+        if (qLen != lQuery) {
+          logErrCode = sendHeader(client, SPARTAN, ST_INVALID, "Error reading query");
+          break;
+        }
+        // Ensure a zero terminated string
+        pQuery[lQuery] = '\0';
+      }
+      else {
+        // Insufficient space
+        logErrCode = sendHeader(client, SPARTAN, ST_INVALID, "Query too long");
+        break;
+      }
+    }
     // Send the requested file or the generated response
-    fileSize = sendFile(client, SPARTAN, pHost, pPath, pExt, "index.gmi");
+    fileSize = sendFile(client, SPARTAN, pHost, pPath, pExt, pQuery, "index.gmi");
     // We can now safely break the loop
     break;
   }
@@ -1225,7 +1239,7 @@ void clGopher(WiFiClient * client) {
         Serial.print(F("Query: ")); Serial.println(pQuery);
     */
 
-    fileSize = sendFile(client, GOPHER, fqdn, pPath, pExt, "gopher.map");
+    fileSize = sendFile(client, GOPHER, fqdn, pPath, pExt, pQuery, "gopher.map");
     client->print("\r\n.\r\n");
     // We can now safely break the loop
     break;
@@ -1307,7 +1321,7 @@ void clHTTP(WiFiClient *client) {
       pQuery = pEOL;
 
     // Send the requested file or the generated response
-    fileSize = sendFile(client, HTTP, NULL, pPath, pExt, "index.gmi");
+    fileSize = sendFile(client, HTTP, NULL, pPath, pExt, pQuery, "index.gmi");
     // We can now safely break the loop
     break;
   }
@@ -1321,6 +1335,7 @@ void clHTTP(WiFiClient *client) {
 
 // Main Arduino setup function
 void setup() {
+  delay(1000);
   // Init the serial interface
   Serial.begin(115200);
   Serial.println();
