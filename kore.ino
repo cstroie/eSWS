@@ -188,7 +188,8 @@ int readln(File *file, char *buf, int maxLen = 1024) {
     // Line must start with a non-control character
     if (len == 0 and c < 32) continue;
     // Limit line length
-    if (len > maxLen - 1) {
+    if (len >= maxLen - 1) {
+      // Return an error code for line too long
       len = -1;
       break;
     }
@@ -203,7 +204,10 @@ int readln(File *file, char *buf, int maxLen = 1024) {
     else
       buf[len++] = c;
   }
-  // Return the lenght
+  // Return another error code on no data
+  if (!file->available() and len == 0)
+    len = -2;
+  // Return the line lenght
   return len;
 }
 
@@ -323,9 +327,11 @@ void initWiFi() {
   Serial.print(F(" ... "));
   File file = SD.open(WIFI_CFG, "r");
   if (file.isFile()) {
-    while (len > 0) {
+    while (len >= 0) {
       // Read one line from file
       len = readln(&file, buf, 256);
+      // Skip over empty lines
+      if (len == 0) continue;
       // Skip over comment lines
       if (buf[0] == '#') continue;
       // Find the SSID and the PASS, TAB-separated
@@ -364,9 +370,11 @@ void loadMimeTypes() {
   Serial.print(F(" ... "));
   File file = SD.open(MIMETYPE, "r");
   if (file.isFile()) {
-    while (len > 0) {
+    while (len >= 0) {
       // Read one line from file
       len = readln(&file, buf, 256);
+      // Skip over empty lines
+      if (len == 0) continue;
       // Skip over comment lines
       if (buf[0] == '#') continue;
       // Find the extension and the mime type, TAB-separated
@@ -500,35 +508,14 @@ int sendHeader(Stream *client, proto_t proto, status_t status, const char *pText
       client->print("\r\nConnection: close\r\n\r\n");
       break;
     case GOPHER:
-      client->print(pText);
-      client->print("\r\n");
+      if (status != ST_OK) {
+        client->print(pText);
+        client->print("\r\n");
+      }
       break;
   }
   // Return the status code
   return rspStatus[proto][status];
-}
-
-// Send one gophermap line
-int sendGopherMapLine(Stream *client, char gType = 'i', const char *gPath = NULL, const char *gText1 = NULL, const char *gText2 = NULL, const char *gServer = NULL, int gPort = 70) {
-  int outSize = 0;
-  outSize += client->print(gType);
-  if (gText1 != NULL)
-    outSize += client->print(gText1);
-  if (gText2 != NULL)
-    outSize += client->print(gText2);
-  outSize += client->print("\t");
-  if (gPath != NULL)
-    outSize += client->print(gPath);
-  outSize += client->print("\t");
-  if (gServer != NULL)
-    outSize += client->print(gServer);
-  else
-    outSize += client->print("null");
-  outSize += client->print("\t");
-  outSize += client->print(gPort);
-  outSize += client->print("\r\n");
-  // Return the output size
-  return outSize ;
 }
 
 // Send a file in CPIO arhive
@@ -611,16 +598,68 @@ int cpioSendArchive(Stream * client, proto_t proto, char *path) {
   return outSize;
 }
 
+// Try to read the title of a gemini page (open file)
+int readPageTitle(File *file, char *line, const int maxLen = 100, const int maxLines = 5) {
+  int len = 0;
+  int count = maxLines;
+  if (file->isFile()) {
+    // Read the first maxLines lines from the file, at most
+    while (count-- > 0) {
+      // Read one line from file
+      len = readln(file, line, maxLen - 5);
+      // Skip over empty lines
+      if (len == 0) continue;
+      // Break if read error
+      if (len == -2) break;
+      // Break if title found
+      if (line[0] == '#') break;
+      // Reset the buffer
+      line[0] = '\0';
+    }
+    // Error reading file or nothing in the first maxLines lines
+    if (len == -2 or len == 0) {
+      len = 0;
+      line[len] = '\0';
+    }
+    else {
+      // Line too long, trim its tail
+      if (len == -1) {
+        strcpy(&line[maxLen - 5], " ...");
+        len = maxLen;
+      }
+      // Check if it's a title and trim its head
+      if (line[0] == '#') {
+        int head = strspn(line, "# \t");
+        line = &line[head];
+        len -= head;
+      }
+    }
+  }
+  // Return the line lenght
+  return len;
+}
+
+// Try to read the title of a gemini page (by path)
+int readPageTitle(char *path, char *line, const int maxLen = 100, const int maxLines = 5) {
+  // Open the file
+  File file = SD.open(path);
+  int len = readPageTitle(&file, line, maxLen, maxLines);
+  // Close the file
+  file.close();
+  // Return the line lenght
+  return len;
+}
+
 // Send a gemini feed
-int sendFeed(Stream * client, proto_t proto, char *path, char *fsPath) {
+int sendFeed(Stream * client, proto_t proto, char *path, char *pathFS) {
   int outSize = 0;
   int len;
   time_t modTime;
   struct tm* stTime;
-  char title[100];
+  char line[100];
   char *pTitle;
   // Check the directory exists
-  if (!SD.exists(fsPath)) {
+  if (!SD.exists(pathFS)) {
     logErrCode = sendHeader(client, proto, ST_NOTFOUND, "File not found");
     return 0;
   }
@@ -631,38 +670,31 @@ int sendFeed(Stream * client, proto_t proto, char *path, char *fsPath) {
   // Start with the header
   logErrCode = sendHeader(client, proto, ST_OK, "text/gemini");
 
-  // Use the 'index.gmi' file, if any, to get the title
-  char *indexPath = new char[strlen(fsPath) + 20];
-  strcpy(indexPath, fsPath);
-  strcat(indexPath, "/index.gmi");
-  File index = SD.open(indexPath);
-  if (index.isFile()) {
-    // Read the first non empty line from the file
-    while (true) {
-      // Read one line from file
-      len = readln(&index, title, 95);
-      // If non empty, break
-      if (len != 0) break;
-    }
-    // Line too long, trim it
-    if (len == -1) {
-      strcpy(&title[95], " ...");
-      len = 99;
-    }
-    if (title[0] != '#')
-      outSize += client->print("# ");
-    outSize += client->print(title);
+  // Use the 'index.gmi' file to get the feed title
+  char *pathIndex = new char[strlen(pathFS) + 20];
+  strcpy(pathIndex, pathFS);
+  strcat(pathIndex, "/index.gmi");
+  // Read the title
+  len = readPageTitle(pathIndex, line);
+  // Check if we got something
+  if (len > 0) {
+    // Trim its head
+    int head = strspn(line, "# \t");
+    pTitle = &line[head];
+    len -= head;
+    outSize += client->print("# ");
+    outSize += client->print(pTitle);
+    outSize += client->print("\r\n\r\n");
   }
   else
-    outSize += client->print("# Feed");
-  index.close();
-  delete(indexPath);
-  outSize += client->print("\r\n\r\n");
+    outSize += client->print("# No title\r\n\r\n");
+  // Delete the temporary path string
+  delete(pathIndex);
 
-  // List files in the specified path
-  File root = SD.open(fsPath);
+  // List files in the specified filesystem path
+  File root = SD.open(pathFS);
   while (File entry = root.openNextFile()) {
-    // Ignore directories, hidden and index files
+    // Ignore some items
     if (entry.isDirectory() or                        // directories
         entry.name()[0] == '.' or                     // hidden files
         strncmp(entry.name(), "index.", 6) == 0 or    // index
@@ -673,59 +705,40 @@ int sendFeed(Stream * client, proto_t proto, char *path, char *fsPath) {
     time_t modTime = entry.getLastWrite();
     stTime = localtime(&modTime);
 
-    // Read the first non empty line from the file
-    while (true) {
-      // Read one line from file
-      len = readln(&entry, title, 95);
-      // If non empty, break
-      if (len != 0) break;
+    // Read the title
+    len = readPageTitle(&entry, line);
+    // Check if we got something
+    if (len > 0) {
+      // Trim its head
+      int head = strspn(line, "# \t");
+      pTitle = &line[head];
+      len -= head;
     }
-    // Line too long, trim it
-    if (len == -1) {
-      strcpy(&title[95], " ...");
-      len = 99;
-    }
-    pTitle = &title[0];
-    if (len > 0)
-      // Remove starting '# '
-      pTitle = &title[strspn(title, "# \t")];
-    else
+    else {
       // Just use the file name
-      strcpy(title, entry.name());
+      // FIXME
+      strcpy(line, (char*)entry.name());
+      pTitle = &line[0];
+    }
 
     // Different for different protocols
     switch (proto) {
-      case GOPHER: {
-          char gPath[200];
-          if (path[0] != '/') {
-            strcpy(gPath, "/");
-            strcat(gPath, path);
-          }
-          else {
-            strcpy(gPath, path);
-          }
-          strcat(gPath, "/");
-          strcat(path, entry.name());
-          // Write the line
-          outSize += sendGopherMapLine(client, '0', gPath, pTitle, NULL, fqdn);
-        }
+      case GOPHER:
+        outSize += client->printf("0%4d-%02d-%02d %s\t%s/%s\t%s\t%d\r\n",
+                                  (stTime->tm_year) + 1900, (stTime->tm_mon) + 1, stTime->tm_mday, pTitle, path, entry.name(), fqdn, 70);
         break;
       case GEMINI:
       case SPARTAN:
       case HTTP:
-        outSize += client->printf("=> %s/%s\t%d-%02d-%02d %s\r\n", path, entry.name(), (stTime->tm_year) + 1900, (stTime->tm_mon) + 1, stTime->tm_mday, pTitle);
+        outSize += client->printf("=> %s/%s\t%d-%02d-%02d %s\r\n",
+                                  path, entry.name(), (stTime->tm_year) + 1900, (stTime->tm_mon) + 1, stTime->tm_mday, pTitle);
         break;
     }
+    // Close the file
     entry.close();
   }
+  // Close the directory
   root.close();
-
-
-
-
-
-
-
 
   outSize += client->print("\r\n");
   // Restore the path
@@ -862,8 +875,8 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
     // Send the response
     switch (proto) {
       case GOPHER:
-        fileSize += sendGopherMapLine(client, 'i', NULL, "Content of ", pPath);
-        fileSize += sendGopherMapLine(client, 'i');
+        fileSize += client->printf("iContent of %s\t\tnull\t70\r\n", pPath);
+        fileSize += client->print("i\t\tnull\t70\r\n");
         break;
       case GEMINI:
       case SPARTAN:
@@ -914,7 +927,9 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
             if (entry.isDirectory())
               strcat(gPath, "/");
             // Write the line
-            fileSize += sendGopherMapLine(client, gType, gPath, (char*)entry.name(), NULL, fqdn);
+            fileSize += client->printf("%c%s\t%s\t%s\t%d\r\n",
+                                       gType, (char*)entry.name(), gPath, fqdn, 70);
+
           }
           break;
         case GEMINI:
@@ -948,7 +963,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
     // Restore the filePath
     pFName[0] = '/';
   }
-  else if (strncmp(pFName, "/feed.gmi", 9) == 0) {
+  else if (strncmp(pFName, "/feeds.gmi", 9) == 0) {
     // The requested virtual file is a gemini feed
     pFName[0] = '\0';
     // Send the feed
@@ -1316,8 +1331,8 @@ void setup() {
   Serial.println(__DATE__);
 
   // Configure the LED
-  pinMode(LED, OUTPUT);
-  digitalWrite(LED, LOW ^ LEDinv);
+  //pinMode(LED, OUTPUT);
+  //digitalWrite(LED, LOW ^ LEDinv);
 
   // SPI
   SPI.begin();
@@ -1330,6 +1345,7 @@ void setup() {
       spiCS = cs;
       break;
     }
+    delay(100);
   }
   if (spiCS > -1) {
     Serial.println(F("found!"));
@@ -1470,7 +1486,7 @@ void loop() {
       BearSSL::WiFiClientSecure client = srvGemini.accept();
       if (client) {
         // LED on
-        digitalWrite(LED, HIGH ^ LEDinv);
+        //digitalWrite(LED, HIGH ^ LEDinv);
 
         //std::vector<uint16_t> cyphers = { BR_TLS_RSA_WITH_AES_256_CBC_SHA256, BR_TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA, BR_TLS_RSA_WITH_3DES_EDE_CBC_SHA };
         //client.setCiphers(cyphers);
@@ -1480,38 +1496,38 @@ void loop() {
         // Handle the client
         clGemini(&client);
         // LED off
-        digitalWrite(LED, LOW ^ LEDinv);
+        //digitalWrite(LED, LOW ^ LEDinv);
       }
     }
 
     WiFiClient spartan = srvSpartan.accept();
     if (spartan) {
       // LED on
-      digitalWrite(LED, HIGH ^ LEDinv);
+      //digitalWrite(LED, HIGH ^ LEDinv);
       // Handle the client
       clSpartan(&spartan);
       // LED off
-      digitalWrite(LED, LOW ^ LEDinv);
+      //digitalWrite(LED, LOW ^ LEDinv);
     }
 
     WiFiClient gopher = srvGopher.accept();
     if (gopher) {
       // LED on
-      digitalWrite(LED, HIGH ^ LEDinv);
+      //digitalWrite(LED, HIGH ^ LEDinv);
       // Handle the client
       clGopher(&gopher);
       // LED off
-      digitalWrite(LED, LOW ^ LEDinv);
+      //digitalWrite(LED, LOW ^ LEDinv);
     }
 
     WiFiClient http = srvHTTP.accept();
     if (http) {
       // LED on
-      digitalWrite(LED, HIGH ^ LEDinv);
+      //digitalWrite(LED, HIGH ^ LEDinv);
       // Handle the client
       clHTTP(&http);
       // LED off
-      digitalWrite(LED, LOW ^ LEDinv);
+      //digitalWrite(LED, LOW ^ LEDinv);
     }
   }
   else {
