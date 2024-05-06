@@ -34,6 +34,7 @@
 #define WIFI_CFG "/wifi.cfg"
 #define HOSTNAME "/hostname.cfg"
 #define DDNS_TOK "/duckdns.cfg"
+#define TITAN_TOK "/titan.cfg"
 #define TZ_CFG "/tz.cfg"
 
 // Mime types
@@ -122,6 +123,7 @@ WiFiServer srvGopher(70);
 char *host;
 char *fqdn;
 char *ddns;
+char *cfgTitanToken;
 char *tz;
 char *ssid;
 char *pass;
@@ -179,7 +181,7 @@ int readln(Stream *stream, char *buf, int maxLen = 1024) {
 }
 
 // Read one line from file, delimited by the specified char,
-// with maximum of specified lenght, and return the lenght read string
+// with maximum of specified lenght, and return the lenght of the read string
 int readln(File *file, char *buf, int maxLen = 1024) {
   int len = 0;
   while (file->available()) {
@@ -289,6 +291,33 @@ void loadDuckDNS() {
       Serial.println(F("done."));
       ddns = new char[strlen(token) + 1];
       strcpy(ddns, token);
+    }
+  }
+  else
+    Serial.println(F("failed."));
+  file.close();
+}
+
+// Load titan:// token
+void loadTitanToken() {
+  int len = 1024;
+  // Read the titan:// token
+  Serial.print(F("GMI: Reading titan:// token from "));
+  Serial.print(TITAN_TOK);
+  Serial.print(F(" ... "));
+  File file = SD.open(TITAN_TOK, "r");
+  if (file.isFile()) {
+    while (len >= 0) {
+      // Read one line from file
+      len = readln(&file, buf, 256);
+      // Skip over empty lines
+      if (len == 0) continue;
+      // Skip over comment lines
+      if (buf[0] == '#') continue;
+      Serial.println(F("done."));
+      cfgTitanToken = new char[strlen(buf) + 1];
+      strcpy(cfgTitanToken, buf);
+      break;
     }
   }
   else
@@ -776,6 +805,102 @@ int sendStatusPage(Stream *client) {
   return fileSize;
 }
 
+// Receive a file using the titan:// schema and write it to filesystem
+int receiveFile(Stream *client, char *pHost, char *pPath, char *plData, int plSize, int bufSize) {
+  int fileSize = 0;
+  // Validate the path (.. /./ //)
+  if (strstr(pPath, "..") != NULL or
+      strstr(pPath, "/./") != NULL or
+      strstr(pPath, "//") != NULL) {
+    logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Invalid path");
+    return 0;
+  }
+  // Virtual hosting, find the server root directory
+  int hostLen = strlen(fqdn);
+  // Find the longest host name
+  if (pHost != NULL)
+    if (hostLen < strlen(pHost))
+      hostLen = strlen(pHost);
+  // Dinamically create the file path ("/" + host + path (+ "index.gmi"))
+  char *filePath = new char[strlen(pPath) + hostLen + 20];
+  strcpy(filePath, "/");
+  // Check if the hostname and request host are the same and append the host
+  if (pHost == NULL)
+    // No host in request (Gopher, HTTP/1.0)
+    strcat(filePath, fqdn);
+  else if (strncmp(host, pHost, strlen(host)) == 0 and strncmp(&pHost[strlen(host)], ".local", 6) == 0)
+    // Host for .local
+    strcat(filePath, host);
+  else {
+    strcat(filePath, pHost);
+    // Check the virtual host directory exists
+    File file = SD.open(filePath, "r");
+    if (!file.isDirectory()) {
+      // Fallback to FQDN
+      strcpy(filePath, "/");
+      strcat(filePath, fqdn);
+    }
+    file.close();
+  }
+  // Append the path
+  if (filePath[strlen(filePath) - 1] != '/' and pPath[0] != '/')
+    strcat(filePath, "/");
+  strcat(filePath, pPath);
+  // If directory return error
+  File file = SD.open(filePath, "r");
+  if (file.isDirectory()) {
+    file.close();
+    logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Path is a directory");
+    delete (filePath);
+    return 0;
+  };
+  file.close();
+  // Total bytes received
+  int total = 0;
+  // Open the temporary file for writing
+  File wrFile = SD.open("/~titan~.tmp", "w");
+  // If the file is available, write to it
+  if (wrFile) {
+    int toRead = plSize;
+    while (toRead > 0) {
+      toRead = plSize - total;
+      int qLen = client->readBytes(plData, ((toRead > bufSize) ? bufSize : toRead));
+      if (qLen > 0) {
+        wrFile.write(plData, qLen);
+        total += qLen;
+      }
+    }
+    wrFile.close();
+  }
+  else {
+    logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Cannot open file for writing");
+    delete (filePath);
+    return 0;
+  };
+  if (total != plSize) {
+    logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Error reading payload");
+    delete (filePath);
+    return 0;
+  }
+  // Move the temporary file
+  File srcFile = SD.open("/~titan~.tmp", "r");
+  File dstFile = SD.open(filePath, "w");
+  uint8_t buf[512];
+  while (srcFile.available()) {
+    int len = srcFile.read(buf, 512);
+    dstFile.write(buf, len);
+  }
+  dstFile.close();
+  srcFile.close();
+  SD.remove("/~titan~.tmp");
+
+  // Destroy the file path string
+  delete (filePath);
+  // Return the file size
+  return fileSize;
+}
+
+// Send file content, autoindex or generated file
 int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt, char *pQuery, const char *pFile) {
   int fileSize = 0;
   int dirEnd = 0;
@@ -831,6 +956,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
   // Find the requested file name in filesystem path
   pFName = strrchr(filePath, '/');
   // Find the extension
+  // FIXME stack overflow if it does not exists
   pExt = strrchr(pFName, '.');
 
   // Check if the file exists
@@ -1075,7 +1201,7 @@ void clGemini(BearSSL::WiFiClientSecure * client) {
     // Find the query
     pQuery = strchr(pPath, '?');
     if (pQuery == NULL) {
-      // Try to identify paramters, as used by titan
+      // Try to identify parameters, as used by titan
       pQuery = strchr(pPath, ';');
     }
     if (pQuery != NULL) {
@@ -1119,34 +1245,36 @@ void clGemini(BearSSL::WiFiClientSecure * client) {
         // Next fragment
         pKey = strtok(NULL, ";");
       }
+      // Check the token, if configured
+      if (cfgTitanToken != NULL) {
+        // XXX
+        Serial.println();
+        Serial.println(cfgTitanToken);
+        Serial.println(pToken);
+        // FIXME
+        if (strncmp(cfgTitanToken, pToken, strlen(pToken)) != 0) {
+          logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Invalid token");
+          break;
+        }
+      }
       // Check if the payload size is greater than zero
       if (plSize <= 0) {
         logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Invalid payload size");
         break;
       }
-      // Check the space we have
-      if ((1023 - len) > (int)plSize) {
-        // Read all the remaining data
+      int wrBufSize = 1023 - len;
+      // Ensure a minimum buffer size
+      if (wrBufSize > 16) {
         plData = pEOL + 1;
-        int qLen = client->readBytes(plData, plSize);
-        // Check the read data lenght
-        if (qLen != plSize) {
-          logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Error reading payload");
-          break;
-        }
-        // Ensure a zero terminated string
-        plData[plSize] = '\0';
+        // Receive the file and write it to filesystem
+        fileSize = receiveFile(client, pHost, pPath, plData, plSize, wrBufSize);
       }
       else {
         // Insufficient space
-        logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Payload too large");
+        logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Insufficient buffer");
         break;
       }
-      // We have the payload
-      // XXX
-      Serial.println();
-      Serial.println(plData);
-      // Redirect to the same page using gemini schema
+      // Redirect to the same page using gemini:// schema
       char *redir = new char[len + 1];
       strcpy(redir, "gemini://");
       strcat(redir, pHost);
@@ -1330,7 +1458,7 @@ void clGopher(WiFiClient * client) {
 }
 
 // Handle HTTP protocol
-void clHTTP(WiFiClient *client) {
+void clHTTP(WiFiClient * client) {
   char *pMethod, *pPath, *pExt, *pQuery, *pProto, *pEOL;
   // Prepare the log
   getLocalTime(&logTime);
@@ -1490,6 +1618,8 @@ void setup() {
 #endif
   // Load time zone configuration
   loadTimeZone();
+  // Load the titan:// token
+  loadTitanToken();
 }
 
 // Main Arduino loop
