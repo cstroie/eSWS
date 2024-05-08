@@ -680,6 +680,21 @@ int readPageTitle(char *path, char *line, const int maxLen = 100, const int maxL
   return len;
 }
 
+// Send the content of a file
+int sendFileContent(Stream *client, File *file) {
+  int outSize = 0;
+  uint8_t fileBuf[512];
+  if (file->isFile()) {
+    // Send the content
+    while (file->available()) {
+      int len = file->read(fileBuf, 512);
+      client->write(fileBuf, len);
+      outSize += len;
+    }
+  }
+  return outSize;
+}
+
 // Send a gemini feed
 int sendFeed(Stream * client, proto_t proto, char *path, char *pathFS) {
   int outSize = 0;
@@ -688,6 +703,8 @@ int sendFeed(Stream * client, proto_t proto, char *path, char *pathFS) {
   struct tm* stTime;
   char line[100];
   char *pTitle;
+  char *tmpPath;
+  File tmpFile;
   // Check the directory exists
   if (!SD.exists(pathFS)) {
     logErrCode = sendHeader(client, proto, ST_NOTFOUND, "File not found");
@@ -700,43 +717,54 @@ int sendFeed(Stream * client, proto_t proto, char *path, char *pathFS) {
   // Start with the header
   logErrCode = sendHeader(client, proto, ST_OK, "text/gemini");
 
-  // Use the 'index.gmi' file to get the feed title
-  char *pathIndex = new char[strlen(pathFS) + 20];
-  strcpy(pathIndex, pathFS);
-  strcat(pathIndex, "/index.gmi");
-  // Read the title
-  len = readPageTitle(pathIndex, line);
-  // Check if we got something
-  if (len > 0) {
-    // Trim its head
-    int head = strspn(line, "# \t");
-    pTitle = &line[head];
-    len -= head;
-    outSize += client->print("# ");
-    outSize += client->print(pTitle);
-    outSize += client->print("\r\n\r\n");
+  // Create a temporary path
+  tmpPath = new char[strlen(pathFS) + 20];
+
+  // Check if there is a feed header file
+  strcpy(tmpPath, pathFS);
+  strcat(tmpPath, "/feed-hdr.gmi");
+  tmpFile = SD.open(tmpPath, "r");
+  outSize += sendFileContent(client, &tmpFile);
+  tmpFile.close();
+
+  // Use the 'index.gmi' file to get the feed title if no feed header file
+  if (outSize == 0) {
+    strcpy(tmpPath, pathFS);
+    strcat(tmpPath, "/index.gmi");
+    // Read the title
+    len = readPageTitle(tmpPath, line);
+    // Check if we got something
+    if (len > 0) {
+      // Trim its head
+      int head = strspn(line, "# \t");
+      pTitle = &line[head];
+      len -= head;
+      outSize += client->print("# ");
+      outSize += client->print(pTitle);
+      outSize += client->print("\r\n\r\n");
+    }
+    else
+      outSize += client->print("# No title\r\n\r\n");
   }
-  else
-    outSize += client->print("# No title\r\n\r\n");
-  // Delete the temporary path string
-  delete(pathIndex);
 
   // List files in the specified filesystem path
   File root = SD.open(pathFS);
-  while (File entry = root.openNextFile()) {
+  while (tmpFile = root.openNextFile()) {
     // Ignore some items
-    if (entry.isDirectory() or                        // directories
-        entry.name()[0] == '.' or                     // hidden files
-        strncmp(entry.name(), "index.", 6) == 0 or    // index
-        strncmp(entry.name(), "gopher.", 7) == 0 or   // gopher map
-        strspn(entry.name(), "1234567890") < 2)       // needs to start with 2 digits
+    if (tmpFile.isDirectory() or                        // directories
+        tmpFile.name()[0] == '.' or                     // hidden files
+        strncmp(tmpFile.name(), "index.", 6) == 0 or    // index
+        strncmp(tmpFile.name(), "gopher.", 7) == 0 or   // gopher map
+        strspn(tmpFile.name(), "1234567890") < 2)       // needs to start with 2 digits
       continue;
     // Get the last modified time
-    time_t modTime = entry.getLastWrite();
-    stTime = localtime(&modTime);
+    time_t fileTime = tmpFile.getLastWrite();
+    // Get creation time
+    //time_t fileTime = tmpFile.getCreationTime();
+    stTime = localtime(&fileTime);
 
     // Read the title
-    len = readPageTitle(&entry, line);
+    len = readPageTitle(&tmpFile, line);
     // Check if we got something
     if (len > 0) {
       // Trim its head
@@ -746,7 +774,7 @@ int sendFeed(Stream * client, proto_t proto, char *path, char *pathFS) {
     }
     else {
       // Just use the file name
-      strcpy(line, (char*)entry.name());
+      strcpy(line, (char*)tmpFile.name());
       pTitle = &line[0];
     }
 
@@ -754,20 +782,30 @@ int sendFeed(Stream * client, proto_t proto, char *path, char *pathFS) {
     switch (proto) {
       case GOPHER:
         outSize += client->printf("0%4d-%02d-%02d %s\t%s/%s\t%s\t%d\r\n",
-                                  (stTime->tm_year) + 1900, (stTime->tm_mon) + 1, stTime->tm_mday, pTitle, path, entry.name(), fqdn, 70);
+                                  (stTime->tm_year) + 1900, (stTime->tm_mon) + 1, stTime->tm_mday, pTitle, path, tmpFile.name(), fqdn, 70);
         break;
       case GEMINI:
       case SPARTAN:
       case HTTP:
         outSize += client->printf("=> %s/%s\t%d-%02d-%02d %s\r\n",
-                                  path, entry.name(), (stTime->tm_year) + 1900, (stTime->tm_mon) + 1, stTime->tm_mday, pTitle);
+                                  path, tmpFile.name(), (stTime->tm_year) + 1900, (stTime->tm_mon) + 1, stTime->tm_mday, pTitle);
         break;
     }
     // Close the file
-    entry.close();
+    tmpFile.close();
   }
   // Close the directory
   root.close();
+
+  // Check if there is a feed footer file
+  strcpy(tmpPath, pathFS);
+  strcat(tmpPath, "/feed-ftr.gmi");
+  tmpFile = SD.open(tmpPath, "r");
+  outSize += sendFileContent(client, &tmpFile);
+  tmpFile.close();
+
+  // Delete the temporary path string
+  delete(tmpPath);
 
   outSize += client->print("\r\n");
   // Restore the path
@@ -986,11 +1024,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
       }
     }
     // Send content
-    uint8_t fileBuf[512];
-    while (file.available()) {
-      int len = file.read(fileBuf, 512);
-      client->write(fileBuf, len);
-    }
+    sendFileContent(client, &file);
     file.close();
   }
   else if (dirEnd > 0) {
@@ -1238,16 +1272,16 @@ void clGemini(BearSSL::WiFiClientSecure * client) {
         if (pVal != NULL) {
           // Starting with the next char there is the value
           pVal++;
-          if      (strcmp(pKey, "mime") == 0) pMime = pVal;
-          else if (strcmp(pKey, "token") == 0) pToken = pVal;
-          else if (strcmp(pKey, "size") == 0) plSize = strtol(pVal, NULL, 10);
+          if      (strncmp(pKey, "mime", 4) == 0) pMime = pVal;
+          else if (strncmp(pKey, "token", 5) == 0) pToken = pVal;
+          else if (strncmp(pKey, "size", 4) == 0) plSize = strtol(pVal, NULL, 10);
         }
         // Next fragment
         pKey = strtok(NULL, ";");
       }
       // Check the token, if configured
       if (cfgTitanToken != NULL) {
-        if (strcmp(cfgTitanToken, pToken) != 0) {
+        if (strncmp(cfgTitanToken, pToken, strlen(cfgTitanToken)) != 0) {
           logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Invalid token");
           break;
         }
