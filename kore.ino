@@ -24,7 +24,7 @@
 
 // Software name and version
 #define PROGNAME "kore"
-#define PROGVERS "0.2"
+#define PROGVERS "0.3"
 
 // Certificate and key
 #define SSL_CERT "/ssl/crt.pem"
@@ -152,7 +152,7 @@ ADC_MODE(ADC_VCC);
 
 // Read one line from stream, delimited by the specified char,
 // with maximum of specified lenght, and return the lenght read string
-int readln(Stream *stream, char *buf, int maxLen = 1024) {
+int readLine(Stream *stream, char *buf, int maxLen = 1024) {
   int len = 0;
   while (stream->available()) {
     // Read one char
@@ -162,9 +162,8 @@ int readln(Stream *stream, char *buf, int maxLen = 1024) {
       len = -1;
       break;
     }
-
-    // Will always store CRLF, then ZERO
-    if (c == '\r') {
+    // Will always return CRLF, then ZERO
+    if (c == '\r' or c == '\n') {
       // Consume one more char if CRLF
       if (stream->peek() == '\n')
         stream->read();
@@ -176,13 +175,18 @@ int readln(Stream *stream, char *buf, int maxLen = 1024) {
     else
       buf[len++] = c;
   }
+  // No (more) data available
+  if (!stream->available()) {
+    // No EOL?
+    buf[len] = '\0';
+  }
   // Return the lenght
   return len;
 }
 
 // Read one line from file, delimited by the specified char,
 // with maximum of specified lenght, and return the lenght of the read string
-int readln(File *file, char *buf, int maxLen = 1024) {
+int readLine(File *file, char *buf, int maxLen = 1024) {
   int len = 0;
   while (file->available()) {
     // Read one char
@@ -195,7 +199,7 @@ int readln(File *file, char *buf, int maxLen = 1024) {
       len = -1;
       break;
     }
-    // Will never store CRLF
+    // Will never return CRLF
     if (c == '\r' or c == '\n') {
       // Consume one more char if CRLF
       if (file->peek() == '\n')
@@ -206,9 +210,15 @@ int readln(File *file, char *buf, int maxLen = 1024) {
     else
       buf[len++] = c;
   }
-  // Return another error code on no data
-  if (!file->available() and len == 0)
-    len = -2;
+  // No (more) data available
+  if (!file->available()) {
+    if (len == 0)
+      // No data at all
+      len = -2;
+    else
+      // No EOL?
+      buf[len] = '\0';
+  }
   // Return the line lenght
   return len;
 }
@@ -255,20 +265,23 @@ void setHostname() {
   Serial.print(F(" ... "));
   File file = SD.open(HOSTNAME, "r");
   if (file.isFile()) {
-    len = file.read((uint8_t *)buf, 255);
-    char *token = strtok(buf, "\t\r\n");
-    if (token != NULL) {
-      fqdn = strdup(token);
+    while (len >= 0) {
+      // Read one line from file
+      len = readLine(&file, buf, 256);
+      // Skip over empty lines
+      if (len == 0) continue;
+      fqdn = strdup(buf);
       // Find the first occurence of '.' in FQDN
-      char *dom = strchr(token, '.');
+      char *dom = strchr(buf, '.');
       if (dom != NULL) {
         dom[0] = '\0';
-        host = strdup(token);
+        host = strdup(buf);
       }
       else
         host = fqdn;
       Serial.println(fqdn);
       WiFi.hostname(host);
+      break;
     }
   }
   else
@@ -285,12 +298,14 @@ void loadDuckDNS() {
   Serial.print(F(" ... "));
   File file = SD.open(DDNS_TOK, "r");
   if (file.isFile()) {
-    len = file.read((uint8_t *)buf, 255);
-    char *token = strtok(buf, "\t\r\n");
-    if (token != NULL) {
+    while (len >= 0) {
+      // Read one line from file
+      len = readLine(&file, buf, 256);
+      // Skip over empty lines
+      if (len == 0) continue;
+      ddns = strdup(buf);
       Serial.println(F("done."));
-      ddns = new char[strlen(token) + 1];
-      strcpy(ddns, token);
+      break;
     }
   }
   else
@@ -309,14 +324,11 @@ void loadTitanToken() {
   if (file.isFile()) {
     while (len >= 0) {
       // Read one line from file
-      len = readln(&file, buf, 256);
+      len = readLine(&file, buf, 256);
       // Skip over empty lines
       if (len == 0) continue;
-      // Skip over comment lines
-      if (buf[0] == '#') continue;
+      cfgTitanToken = strdup(buf);
       Serial.println(F("done."));
-      cfgTitanToken = new char[strlen(buf) + 1];
-      strcpy(cfgTitanToken, buf);
       break;
     }
   }
@@ -334,12 +346,14 @@ void loadTimeZone() {
   Serial.print(F(" ... "));
   File file = SD.open(TZ_CFG, "r");
   if (file.isFile()) {
-    len = file.read((uint8_t *)buf, 255);
-    char *token = strtok(buf, "\t\r\n");
-    if (token != NULL) {
-      tz = new char[strlen(token) + 1];
-      strcpy(tz, token);
+    while (len >= 0) {
+      // Read one line from file
+      len = readLine(&file, buf, 256);
+      // Skip over empty lines
+      if (len == 0) continue;
+      tz = strdup(buf);
       Serial.println(tz);
+      break;
     }
   }
   else
@@ -358,7 +372,7 @@ void initWiFi() {
   if (file.isFile()) {
     while (len >= 0) {
       // Read one line from file
-      len = readln(&file, buf, 256);
+      len = readLine(&file, buf, 256);
       // Skip over empty lines
       if (len == 0) continue;
       // Skip over comment lines
@@ -401,7 +415,7 @@ void loadMimeTypes() {
   if (file.isFile()) {
     while (len >= 0) {
       // Read one line from file
-      len = readln(&file, buf, 256);
+      len = readLine(&file, buf, 256);
       // Skip over empty lines
       if (len == 0) continue;
       // Skip over comment lines
@@ -635,7 +649,7 @@ int readPageTitle(File *file, char *line, const int maxLen = 100, const int maxL
     // Read the first maxLines lines from the file, at most
     while (count-- > 0) {
       // Read one line from file
-      len = readln(file, line, maxLen - 5);
+      len = readLine(file, line, maxLen - 5);
       // Skip over empty lines
       if (len == 0) continue;
       // Break if read error
@@ -1137,7 +1151,7 @@ void clGemini(BearSSL::WiFiClientSecure * client) {
   // Loop as long as connected (and before timed out)
   while (client->connected() and millis() < timeOut) {
     // Read one line from request
-    int len = readln(client, buf);
+    int len = readLine(client, buf);
     // If zero, there is no data yet; read again
     if (len == 0) continue;
     // If last char is not zero, the line is not complete
@@ -1311,7 +1325,7 @@ void clSpartan(WiFiClient * client) {
   unsigned long timeOut = millis() + 5000;
   while (client->connected() and millis() < timeOut) {
     // Read one line from request
-    int len = readln(client, buf);
+    int len = readLine(client, buf);
     // If zero, there is no data yet; read again
     if (len == 0) continue;
     // If last char is not zero, the line is not complete
@@ -1401,7 +1415,7 @@ void clGopher(WiFiClient * client) {
   unsigned long timeOut = millis() + 5000;
   while (client->connected() and millis() < timeOut) {
     // Read one line from request
-    int len = readln(client, buf);
+    int len = readLine(client, buf);
     // If zero, there is no data yet; read again
     if (len == 0) continue;
     // If last char is not zero, the line is not complete
@@ -1467,7 +1481,7 @@ void clHTTP(WiFiClient * client) {
   unsigned long timeOut = millis() + 5000;
   while (client->connected() and millis() < timeOut) {
     // Read one line from request
-    int len = readln(client, buf);
+    int len = readLine(client, buf);
     // If zero, there is no data yet; read again
     if (len == 0) continue;
     // If last char is not zero, the line is not complete
