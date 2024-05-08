@@ -525,49 +525,36 @@ unsigned long uptime(char *buf, size_t len) {
   return upt;
 }
 
-
 // Send the proper header according to protocol and return the real status
 int sendHeader(Stream *client, proto_t proto, status_t status, const char *pText) {
+  uint16_t stCode = rspStatus[proto][status];
   switch (proto) {
     case GEMINI:
     case SPARTAN:
-      client->print(rspStatus[proto][status]);
-      client->print(" ");
-      client->print(pText);
-      client->print("\r\n");
+      client->printf("%d %s\r\n", stCode, pText);
       break;
     case HTTP:
-      client->print(F("HTTP/1.0 "));
-      client->print(rspStatus[proto][status]);
-      client->print(" ");
-      if (status == ST_OK) {
-        client->print(F("OK"));
-        client->print(F("\r\nContent-Type: "));
-        client->print(pText);
-        client->print(F("; encoding=utf8"));
-      }
+      if (status == ST_OK)
+        client->printf("HTTP/1.0 %d OK\r\nContent-Type: %s; encoding=utf8\r\nConnection: close\r\n\r\n", stCode, pText);
       else
-        client->print(pText);
-      client->print("\r\nConnection: close\r\n\r\n");
+        client->printf("HTTP/1.0 %d %s\r\nConnection: close\r\n\r\n", stCode, pText);
       break;
     case GOPHER:
-      if (status != ST_OK) {
-        client->print(pText);
-        client->print("\r\n");
-      }
+      if (status != ST_OK)
+        client->printf("%s\r\n", pText);
       break;
   }
   // Return the status code
-  return rspStatus[proto][status];
+  return (int)stCode;
 }
 
 // Send a file in CPIO arhive
-int cpioSendFile(Stream *client, File file) {
+int sendFileCPIO(Stream *client, File file) {
   int outSize = 0;
   int pad = 0;
   // ino type+mode uid gid nlink mtime size devM devm rdevM rdevm filename_len filename 0
   int hdrSize = sprintf(buf, "070701%08X%08X%08X%08X%08X%08X%08X%08X%08X%08X%08X%08X00000000%s%c",
-                        0, 0100644,  0, 0, 1, (uint32_t)file.getLastWrite(), (uint32_t)file.size(), 0, 0, 0, 0, strlen(file.fullName()) + 1, file.fullName(), '\0');
+                        0, 0100644, 0, 0, 1, (uint32_t)file.getLastWrite(), (uint32_t)file.size(), 0, 0, 0, 0, strlen(file.fullName()) + 1, file.fullName(), '\0');
   outSize += hdrSize;
   // Padding
   pad = (- outSize) & 3;
@@ -595,15 +582,15 @@ int cpioSendFile(Stream *client, File file) {
 }
 
 // Send a directory in CPIO arhive
-int cpioSendDir(Stream *client, File dir) {
+int sendDirCPIO(Stream *client, File dir) {
   int outSize = 0;
   while (File entry = dir.openNextFile()) {
     if (entry.isFile())
       // Send the file
-      outSize += cpioSendFile(client, entry);
+      outSize += sendFileCPIO(client, entry);
     else if (entry.isDirectory())
       // Recurse into directory
-      outSize += cpioSendDir(client, entry);
+      outSize += sendDirCPIO(client, entry);
     // Close the file
     entry.close();
   }
@@ -612,7 +599,7 @@ int cpioSendDir(Stream *client, File dir) {
 }
 
 // Send a simple ascii CPIO archive with card contents
-int cpioSendArchive(Stream * client, proto_t proto, char *path) {
+int sendArchCPIO(Stream * client, proto_t proto, char *path) {
   int outSize = 0;
   // Check the path exists
   if (!SD.exists(path)) {
@@ -624,7 +611,7 @@ int cpioSendArchive(Stream * client, proto_t proto, char *path) {
   // Open the directory
   File dir = SD.open(path);
   // Send its content
-  outSize += cpioSendDir(client, dir);
+  outSize += sendDirCPIO(client, dir);
   dir.close();
   // Write the TRAILER
   client->write("070701", 6);
@@ -759,7 +746,6 @@ int sendFeed(Stream * client, proto_t proto, char *path, char *pathFS) {
     }
     else {
       // Just use the file name
-      // FIXME
       strcpy(line, (char*)entry.name());
       pTitle = &line[0];
     }
@@ -1099,7 +1085,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
     // single file). Use it for archive root.
     pFName[0] = '\0';
     // Send the archive
-    fileSize = cpioSendArchive(client, proto, filePath);
+    fileSize = sendArchCPIO(client, proto, filePath);
     // Restore the filePath
     pFName[0] = '/';
   }
@@ -1225,23 +1211,23 @@ void clGemini(BearSSL::WiFiClientSecure * client) {
     else
       pQuery = pEOL;
 
-    /*
-        Serial.println();
-        Serial.print(F("Schema: ")); Serial.println(pSchema);
-        Serial.print(F("Host:   ")); Serial.println(pHost);
-        Serial.print(F("Port:   ")); Serial.println(pPort);
-        Serial.print(F("Path:   ")); Serial.println(pPath);
-        Serial.print(F("Query:  ")); Serial.println(pQuery);
-    */
+#ifdef DEBUG
+    Serial.println();
+    Serial.print(F("Schema: ")); Serial.println(pSchema);
+    Serial.print(F("Host:   ")); Serial.println(pHost);
+    Serial.print(F("Port:   ")); Serial.println(pPort);
+    Serial.print(F("Path:   ")); Serial.println(pPath);
+    Serial.print(F("Query:  ")); Serial.println(pQuery);
+#endif
 
     // If the protocol is 'titan', we need to read the upcoming data. We will use the same buffer, after pEOL
     if (titan) {
       // Quick check the query
       if (strlen(pQuery) <= 0) {
-        logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Invalid query fot titan");
+        logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Invalid parameters for titan");
         break;
       }
-      // We need to decompose the query and get mime, size and token
+      // We need to decompose the query/parameters and get mime, size and token
       char *pKey, *pVal, *pMime, *pToken, *plData;
       long int plSize;
       // Get a fragment from query
@@ -1252,21 +1238,16 @@ void clGemini(BearSSL::WiFiClientSecure * client) {
         if (pVal != NULL) {
           // Starting with the next char there is the value
           pVal++;
-          if      (strncmp(pKey, "mime", 4) == 0) pMime = pVal;
-          else if (strncmp(pKey, "token", 5) == 0) pToken = pVal;
-          else if (strncmp(pKey, "size", 4) == 0) plSize = strtol(pVal, NULL, 10);
+          if      (strcmp(pKey, "mime") == 0) pMime = pVal;
+          else if (strcmp(pKey, "token") == 0) pToken = pVal;
+          else if (strcmp(pKey, "size") == 0) plSize = strtol(pVal, NULL, 10);
         }
         // Next fragment
         pKey = strtok(NULL, ";");
       }
       // Check the token, if configured
       if (cfgTitanToken != NULL) {
-        // XXX
-        Serial.println();
-        Serial.println(cfgTitanToken);
-        Serial.println(pToken);
-        // FIXME
-        if (strncmp(cfgTitanToken, pToken, strlen(pToken)) != 0) {
+        if (strcmp(cfgTitanToken, pToken) != 0) {
           logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Invalid token");
           break;
         }
@@ -1276,12 +1257,12 @@ void clGemini(BearSSL::WiFiClientSecure * client) {
         logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Invalid payload size");
         break;
       }
-      int wrBufSize = 1023 - len;
+      int bufSize = 1023 - len;
       // Ensure a minimum buffer size
-      if (wrBufSize > 16) {
+      if (bufSize > 16) {
         plData = pEOL + 1;
         // Receive the file and write it to filesystem
-        fileSize = receiveFile(client, pHost, pPath, plData, plSize, wrBufSize);
+        fileSize = receiveFile(client, pHost, pPath, plData, plSize, bufSize);
       }
       else {
         // Insufficient space
@@ -1300,12 +1281,15 @@ void clGemini(BearSSL::WiFiClientSecure * client) {
       // Redirect
       logErrCode = sendHeader(client, GEMINI, ST_REDIR, redir);
       delete(redir);
+      // We can now safely break the loop
       break;
     }
-    // Send the requested file or the generated response
-    fileSize = sendFile(client, GEMINI, pHost, pPath, pExt, pQuery, "index.gmi");
-    // We can now safely break the loop
-    break;
+    else {
+      // Send the requested file or the generated response
+      fileSize = sendFile(client, GEMINI, pHost, pPath, pExt, pQuery, "index.gmi");
+      // We can now safely break the loop
+      break;
+    }
   }
   // Print final log part
   logPrint(logErrCode, fileSize);
