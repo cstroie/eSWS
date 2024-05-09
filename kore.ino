@@ -18,7 +18,7 @@
 */
 
 // The DEBUG flag
-//#define DEBUG
+#define DEBUG
 
 //#define USE_UPNP
 
@@ -81,12 +81,12 @@ int spiCSPins[] = {D4, D8, D1, D2, D3, D0};
 // Protocols
 enum proto_t {GEMINI, SPARTAN, HTTP, GOPHER, _PROTO_ALL};
 // Pseudo-statuses
-enum status_t {ST_OK, ST_INPUT, ST_REDIR, ST_NOTFOUND, ST_INVALID, ST_SERVERERROR, _ST_ALL};
+enum status_t {ST_OK, ST_INPUT, ST_PASSWORD, ST_REDIR, ST_NOTFOUND, ST_INVALID, ST_SERVERERROR, _ST_ALL};
 int rspStatus[_PROTO_ALL][_ST_ALL] = {
-  {20, 10, 30, 51, 59, 59},
-  {2, 2, 3, 4, 4, 5},
-  {200, 200, 200, 404, 500, 500},
-  {0, 0, 0, 0, 0, 0}
+  {20, 10, 11, 30, 51, 59, 59},
+  {2, 2, 2, 3, 4, 4, 5},
+  {200, 200, 200, 200, 404, 500, 500},
+  {0, 0, 0, 0, 0, 0, 0}
 };
 
 // TLS server
@@ -144,7 +144,7 @@ char binMimeType[] = "application/octet-stream";
 struct tm logTime;
 char bufTime[30];
 int logErrCode;
-int fileSize;
+int outSize;
 
 // Set ADC to Voltage
 ADC_MODE(ADC_VCC);
@@ -753,9 +753,10 @@ int sendFeed(Stream * client, proto_t proto, char *path, char *pathFS) {
     // Ignore some items
     if (tmpFile.isDirectory() or                        // directories
         tmpFile.name()[0] == '.' or                     // hidden files
+        //strspn(tmpFile.name(), "1234567890") < 2  or    // needs to start with 2 digits
         strncmp(tmpFile.name(), "index.", 6) == 0 or    // index
         strncmp(tmpFile.name(), "gopher.", 7) == 0 or   // gopher map
-        strspn(tmpFile.name(), "1234567890") < 2)       // needs to start with 2 digits
+        strncmp(tmpFile.name(), "feed", 4) == 0)        // feed, feed header and footer
       continue;
     // Get the last modified time
     time_t fileTime = tmpFile.getLastWrite();
@@ -816,36 +817,35 @@ int sendFeed(Stream * client, proto_t proto, char *path, char *pathFS) {
 
 // Send the virtual server status page
 int sendStatusPage(Stream *client) {
-  int fileSize = 0;
+  int outSize = 0;
   logErrCode = sendHeader(client, GEMINI, ST_OK, "text/gemini");
-  fileSize += client->print("# Server status\r\n\r\n");
+  outSize += client->print("# Server status\r\n\r\n");
   // Hostname
-  fileSize += client->print(fqdn);
-  fileSize += client->print("\t");
-  fileSize += client->print(host);
-  fileSize += client->print(".local\r\n\r\n");
+  outSize += client->print(fqdn);
+  outSize += client->print("\t");
+  outSize += client->print(host);
+  outSize += client->print(".local\r\n\r\n");
   // Uptime in seconds and text
   unsigned long ups = 0;
   char upt[32] = "";
   ups = uptime(upt, sizeof(upt));
-  fileSize += client->print("Uptime: "); fileSize += client->print(upt); fileSize += client->print("\r\n");
+  outSize += client->print("Uptime: "); outSize += client->print(upt); outSize += client->print("\r\n");
   // SSID
-  fileSize += client->print("SSID: "); fileSize += client->print(WiFi.SSID()); fileSize += client->print("\r\n");
+  outSize += client->print("SSID: "); outSize += client->print(WiFi.SSID()); outSize += client->print("\r\n");
   // Get RSSI
-  fileSize += client->print("Signal: "); fileSize += client->print(WiFi.RSSI()); fileSize += client->print(" dBm\r\n");
+  outSize += client->print("Signal: "); outSize += client->print(WiFi.RSSI()); outSize += client->print(" dBm\r\n");
   // IP address
-  fileSize += client->print("IP address: "); fileSize += client->print(WiFi.localIP()); fileSize += client->print("\r\n");
+  outSize += client->print("IP address: "); outSize += client->print(WiFi.localIP()); outSize += client->print("\r\n");
   // Free Heap
-  fileSize += client->print("Free memory: "); fileSize += client->print(ESP.getFreeHeap()); fileSize += client->print(" bytes\r\n");
+  outSize += client->print("Free memory: "); outSize += client->print(ESP.getFreeHeap()); outSize += client->print(" bytes\r\n");
   // Read the Vcc (mV)
-  fileSize += client->print("Voltage: "); fileSize += client->print(ESP.getVcc()); fileSize += client->print(" mV\r\n");
+  outSize += client->print("Voltage: "); outSize += client->print(ESP.getVcc()); outSize += client->print(" mV\r\n");
   // Return the file size
-  return fileSize;
+  return outSize;
 }
 
 // Receive a file using the titan:// schema and write it to filesystem
 int receiveFile(Stream *client, char *pHost, char *pPath, char *plData, int plSize, int bufSize) {
-  int fileSize = 0;
   // Validate the path (.. /./ //)
   if (strstr(pPath, "..") != NULL or
       strstr(pPath, "/./") != NULL or
@@ -935,14 +935,14 @@ int receiveFile(Stream *client, char *pHost, char *pPath, char *plData, int plSi
   // Destroy the file path string
   delete (filePath);
   // Return the file size
-  return fileSize;
+  return total;
 }
 
 // Send file content, autoindex or generated file
 int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt, char *pQuery, const char *pFile) {
-  int fileSize = 0;
+  int outSize = 0;
   int dirEnd = 0;
-  char *pFName;
+  char *pName;
   // Validate the path (.. /./ //)
   if (strstr(pPath, "..") != NULL or
       strstr(pPath, "/./") != NULL or
@@ -1000,7 +1000,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
   // Check if the file exists
   if (file.isFile() and strcmp(pQuery, "nofile") != 0) {
     // Keep the size
-    fileSize = file.size();
+    outSize = file.size();
     // Detect mime type
     if (proto != GOPHER) {
       if (pExt == NULL)
@@ -1035,16 +1035,16 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
     // Send the response
     switch (proto) {
       case GOPHER:
-        fileSize += client->printf("iContent of %s\t\tnull\t70\r\n", pPath);
-        fileSize += client->print("i\t\tnull\t70\r\n");
+        outSize += client->printf("iContent of %s\t\tnull\t70\r\n", pPath);
+        outSize += client->print("i\t\tnull\t70\r\n");
         break;
       case GEMINI:
       case SPARTAN:
       case HTTP:
         logErrCode = sendHeader(client, proto, ST_OK, "text/gemini");
-        fileSize += client->print("# Content of ");
-        fileSize += client->print(pPath);
-        fileSize += client->print("\r\n\r\n");
+        outSize += client->print("# Content of ");
+        outSize += client->print(pPath);
+        outSize += client->print("\r\n\r\n");
         break;
     }
     // List files in SD
@@ -1087,7 +1087,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
             if (entry.isDirectory())
               strcat(gPath, "/");
             // Write the line
-            fileSize += client->printf("%c%s\t%s\t%s\t%d\r\n",
+            outSize += client->printf("%c%s\t%s\t%s\t%d\r\n",
                                        gType, (char*)entry.name(), gPath, fqdn, 70);
 
           }
@@ -1095,23 +1095,27 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
         case GEMINI:
         case SPARTAN:
         case HTTP:
-          fileSize += client->print("=> ");
-          fileSize += client->print(pPath);
+          outSize += client->print("=> ");
+          outSize += client->print(pPath);
           if (strlen(pPath) > 1 and pPath[strlen(pPath) - 1] != '/')
-            fileSize += client->print("/");
-          fileSize += client->print(entry.name());
+            outSize += client->print("/");
+          outSize += client->print(entry.name());
           if (entry.isDirectory())
-            fileSize += client->print("/");
-          fileSize += client->print("\t");
-          fileSize += client->print(entry.name());
-          fileSize += client->print("\r\n");
+            outSize += client->print("/");
+          outSize += client->print("\t");
+          outSize += client->print(entry.name());
+          outSize += client->print("\r\n");
           break;
       }
     }
   }
   else if (strcmp(pPath, "/status.gmi") == 0 and proto == GEMINI) {
     // Send the server status page
-    fileSize = sendStatusPage(client);
+    outSize = sendStatusPage(client);
+  }
+  else if (strcmp(pPath, "/input.gmi") == 0 and proto == GEMINI) {
+    // Send the server status page
+    logErrCode = sendHeader(client, proto, ST_PASSWORD, "Password:");
   }
   else if (strncmp(pExt, ".cpio", 5) == 0) {
     // The requested virtual file is a CPIO archive. Trim the filepath
@@ -1119,7 +1123,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
     // single file). Use it for archive root.
     pFName[0] = '\0';
     // Send the archive
-    fileSize = sendArchCPIO(client, proto, filePath);
+    outSize = sendArchCPIO(client, proto, filePath);
     // Restore the filePath
     pFName[0] = '/';
   }
@@ -1127,7 +1131,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
     // The requested virtual file is a gemini feed
     pFName[0] = '\0';
     // Send the feed
-    fileSize = sendFeed(client, proto, pPath, filePath);
+    outSize = sendFeed(client, proto, pPath, filePath);
     // Restore the filePath
     pFName[0] = '/';
   }
@@ -1137,7 +1141,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
   // Destroy the file path string
   delete (filePath);
   // Return the file size
-  return fileSize;
+  return outSize;
 }
 
 // Print the first part of the log line
@@ -1248,10 +1252,10 @@ void clGemini(BearSSL::WiFiClientSecure * client) {
 #ifdef DEBUG
     Serial.println();
     Serial.print(F("Schema: ")); Serial.println(pSchema);
-    Serial.print(F("Host:   ")); Serial.println(pHost);
-    Serial.print(F("Port:   ")); Serial.println(pPort);
-    Serial.print(F("Path:   ")); Serial.println(pPath);
-    Serial.print(F("Query:  ")); Serial.println(pQuery);
+    Serial.print(F("Host  : ")); Serial.println(pHost);
+    Serial.print(F("Port  : ")); Serial.println(pPort);
+    Serial.print(F("Path  : ")); Serial.println(pPath);
+    Serial.print(F("Query : ")); Serial.println(pQuery);
 #endif
 
     // If the protocol is 'titan', we need to read the upcoming data. We will use the same buffer, after pEOL
@@ -1296,7 +1300,7 @@ void clGemini(BearSSL::WiFiClientSecure * client) {
       if (bufSize > 16) {
         plData = pEOL + 1;
         // Receive the file and write it to filesystem
-        fileSize = receiveFile(client, pHost, pPath, plData, plSize, bufSize);
+        outSize = receiveFile(client, pHost, pPath, plData, plSize, bufSize);
       }
       else {
         // Insufficient space
@@ -1320,13 +1324,13 @@ void clGemini(BearSSL::WiFiClientSecure * client) {
     }
     else {
       // Send the requested file or the generated response
-      fileSize = sendFile(client, GEMINI, pHost, pPath, pExt, pQuery, "index.gmi");
+      outSize = sendFile(client, GEMINI, pHost, pPath, pExt, pQuery, "index.gmi");
       // We can now safely break the loop
       break;
     }
   }
   // Print final log part
-  logPrint(logErrCode, fileSize);
+  logPrint(logErrCode, outSize);
   // Close connection
   client->flush();
   client->stop();
@@ -1391,6 +1395,13 @@ void clSpartan(WiFiClient * client) {
       lQuery = strtol(pLen, NULL, 10);
     }
 
+#ifdef DEBUG
+    Serial.println();
+    Serial.print(F("Host    : ")); Serial.println(pHost);
+    Serial.print(F("Path    : ")); Serial.println(pPath);
+    Serial.print(F("QueryLen: ")); Serial.println(lQuery);
+#endif
+
     // If there is any query, we need to read it. We will use the same buffer, after pEOL
     if (lQuery > 0) {
       // Check the space we have
@@ -1405,6 +1416,9 @@ void clSpartan(WiFiClient * client) {
         }
         // Ensure a zero terminated string
         pQuery[lQuery] = '\0';
+#ifdef DEBUG
+        Serial.print(F("Query   : ")); Serial.println(pQuery);
+#endif
       }
       else {
         // Insufficient space
@@ -1413,12 +1427,12 @@ void clSpartan(WiFiClient * client) {
       }
     }
     // Send the requested file or the generated response
-    fileSize = sendFile(client, SPARTAN, pHost, pPath, pExt, pQuery, "index.gmi");
+    outSize = sendFile(client, SPARTAN, pHost, pPath, pExt, pQuery, "index.gmi");
     // We can now safely break the loop
     break;
   }
   // Print final log part
-  logPrint(logErrCode, fileSize);
+  logPrint(logErrCode, outSize);
   // Close connection
   client->flush();
   client->stop();
@@ -1477,13 +1491,13 @@ void clGopher(WiFiClient * client) {
         Serial.print(F("Query: ")); Serial.println(pQuery);
     */
 
-    fileSize = sendFile(client, GOPHER, fqdn, pPath, pExt, pQuery, "gopher.map");
+    outSize = sendFile(client, GOPHER, fqdn, pPath, pExt, pQuery, "gopher.map");
     client->print("\r\n.\r\n");
     // We can now safely break the loop
     break;
   }
   // Print final log part
-  logPrint(logErrCode, fileSize);
+  logPrint(logErrCode, outSize);
   // Close connection
   client->flush();
   client->stop();
@@ -1559,12 +1573,12 @@ void clHTTP(WiFiClient * client) {
       pQuery = pEOL;
 
     // Send the requested file or the generated response
-    fileSize = sendFile(client, HTTP, NULL, pPath, pExt, pQuery, "index.gmi");
+    outSize = sendFile(client, HTTP, NULL, pPath, pExt, pQuery, "index.gmi");
     // We can now safely break the loop
     break;
   }
   // Print final log part
-  logPrint(logErrCode, fileSize);
+  logPrint(logErrCode, outSize);
   // Close connection
   client->flush();
   client->stop();
