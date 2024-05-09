@@ -846,6 +846,7 @@ int sendStatusPage(Stream *client) {
 
 // Receive a file using the titan:// schema and write it to filesystem
 int receiveFile(Stream *client, char *pHost, char *pPath, char *plData, int plSize, int bufSize) {
+  File file;    // The file handler to test the path
   // Validate the path (.. /./ //)
   if (strstr(pPath, "..") != NULL or
       strstr(pPath, "/./") != NULL or
@@ -861,31 +862,34 @@ int receiveFile(Stream *client, char *pHost, char *pPath, char *plData, int plSi
       hostLen = strlen(pHost);
   // Dinamically create the file path ("/" + host + path (+ "index.gmi"))
   char *filePath = new char[strlen(pPath) + hostLen + 20];
+  // Start from root
   strcpy(filePath, "/");
-  // Check if the hostname and request host are the same and append the host
+  // Append the host name, as in request, or fall back to FQDN
   if (pHost == NULL)
     // No host in request (Gopher, HTTP/1.0)
     strcat(filePath, fqdn);
   else if (strncmp(host, pHost, strlen(host)) == 0 and strncmp(&pHost[strlen(host)], ".local", 6) == 0)
-    // Host for .local
+    // Special case for .local
     strcat(filePath, host);
   else {
+    // Use the requested host name
     strcat(filePath, pHost);
-    // Check the virtual host directory exists
-    File file = SD.open(filePath, "r");
-    if (!file.isDirectory()) {
-      // Fallback to FQDN
-      strcpy(filePath, "/");
-      strcat(filePath, fqdn);
-    }
-    file.close();
   }
-  // Append the path
+  // Check the virtual host directory exists
+  file = SD.open(filePath, "r");
+  if (!file.isDirectory()) {
+    // If not, fallback to FQDN
+    file.close();
+    strcpy(filePath, "/");
+    strcat(filePath, fqdn);
+  }
+  // Append a slash, if needed
   if (filePath[strlen(filePath) - 1] != '/' and pPath[0] != '/')
     strcat(filePath, "/");
+  // Append the path
   strcat(filePath, pPath);
-  // If directory return error
-  File file = SD.open(filePath, "r");
+  // If directory, return error
+  file = SD.open(filePath, "r");
   if (file.isDirectory()) {
     file.close();
     logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Path is a directory");
@@ -938,11 +942,13 @@ int receiveFile(Stream *client, char *pHost, char *pPath, char *plData, int plSi
   return total;
 }
 
-// Send file content, autoindex or generated file
-int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt, char *pQuery, const char *pFile) {
-  int outSize = 0;
-  int dirEnd = 0;
-  char *pName;
+// Send file content or generated file
+int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQuery, const char *pFile) {
+  int outSize = 0;  // Total output size
+  int dirEnd = 0;   // Index to directory name ending
+  char *pName;      // The file name part of the path
+  char *pExt;       // The file name extension
+  File file;        // The file handler to test the path
   // Validate the path (.. /./ //)
   if (strstr(pPath, "..") != NULL or
       strstr(pPath, "/./") != NULL or
@@ -958,48 +964,60 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
       hostLen = strlen(pHost);
   // Dinamically create the file path ("/" + host + path (+ "index.gmi"))
   char *filePath = new char[strlen(pPath) + hostLen + 20];
+  // Start from root
   strcpy(filePath, "/");
-  // Check if the hostname and request host are the same and append the host
+  // Append the host name, as in request, or fall back to FQDN
   if (pHost == NULL)
     // No host in request (Gopher, HTTP/1.0)
     strcat(filePath, fqdn);
   else if (strncmp(host, pHost, strlen(host)) == 0 and strncmp(&pHost[strlen(host)], ".local", 6) == 0)
-    // Host for .local
+    // Special case for .local
     strcat(filePath, host);
   else {
+    // Use the requested host name
     strcat(filePath, pHost);
-    // Check the virtual host directory exists
-    File file = SD.open(filePath, "r");
-    if (!file.isDirectory()) {
-      // Fallback to FQDN
-      file.close();
-      strcpy(filePath, "/");
-      strcat(filePath, fqdn);
-    }
   }
-  // Append the path
+  // Check the virtual host directory exists
+  file = SD.open(filePath, "r");
+  if (!file.isDirectory()) {
+    // If not, fallback to FQDN
+    file.close();
+    strcpy(filePath, "/");
+    strcat(filePath, fqdn);
+  }
+  // Append a slash, if needed
   if (filePath[strlen(filePath) - 1] != '/' and pPath[0] != '/')
     strcat(filePath, "/");
+  // Append the path
   strcat(filePath, pPath);
-  // Check if directory and append default file name for protocol
-  File file = SD.open(filePath, "r");
+  // Check if it's directory requested and append default file name for protocol
+  file = SD.open(filePath, "r");
   if (file.isDirectory()) {
     file.close();
+    // Append a slash, if needed
     if (filePath[strlen(filePath) - 1] != '/')
       strcat(filePath, "/");
+    // Keep this position, if it was a directory
     dirEnd = strlen(filePath);
+    // Append the default file name
     strcat(filePath, pFile);
     file = SD.open(filePath, "r");
   };
   // Find the requested file name in filesystem path
-  pFName = strrchr(filePath, '/');
-  // Find the extension
-  // FIXME stack overflow if it does not exists
-  pExt = strrchr(pFName, '.');
+  pName = strrchr(filePath, '/');
+  if (pName == NULL)
+    // Fallback to end of string
+    pName = &filePath[strlen(filePath)];
+  else
+    // Find the extension
+    pExt = strrchr(pName, '.');
+  if (pExt == NULL)
+    // Fallback to end of string
+    pExt = &filePath[strlen(filePath)];
 
   // Check if the file exists
   if (file.isFile() and strcmp(pQuery, "nofile") != 0) {
-    // Keep the size
+    // Keep the file size
     outSize = file.size();
     // Detect mime type
     if (proto != GOPHER) {
@@ -1088,7 +1106,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
               strcat(gPath, "/");
             // Write the line
             outSize += client->printf("%c%s\t%s\t%s\t%d\r\n",
-                                       gType, (char*)entry.name(), gPath, fqdn, 70);
+                                      gType, (char*)entry.name(), gPath, fqdn, 70);
 
           }
           break;
@@ -1121,23 +1139,24 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pExt
     // The requested virtual file is a CPIO archive. Trim the filepath
     // to the file name and get the parent directory (it can also be a
     // single file). Use it for archive root.
-    pFName[0] = '\0';
+    pName[0] = '\0';
     // Send the archive
     outSize = sendArchCPIO(client, proto, filePath);
     // Restore the filePath
-    pFName[0] = '/';
+    pName[0] = '/';
   }
-  else if (strncmp(pFName, "/feed.gmi", 9) == 0) {
+  else if (strncmp(pName, "/feed.gmi", 9) == 0) {
     // The requested virtual file is a gemini feed
-    pFName[0] = '\0';
+    pName[0] = '\0';
     // Send the feed
     outSize = sendFeed(client, proto, pPath, filePath);
     // Restore the filePath
-    pFName[0] = '/';
+    pName[0] = '/';
   }
   else
     // File not found
     logErrCode = sendHeader(client, proto, ST_NOTFOUND, "File not found");
+
   // Destroy the file path string
   delete (filePath);
   // Return the file size
@@ -1165,7 +1184,7 @@ void logPrint(int code, int size) {
 
 // Handle Gemini protocol
 void clGemini(BearSSL::WiFiClientSecure * client) {
-  char *pSchema, *pHost, *pPort, *pPath, *pExt, *pQuery, *pEOL;
+  char *pSchema, *pHost, *pPort, *pPath, *pQuery, *pEOL;
   bool titan = false;
   // Prepare the log
   getLocalTime(&logTime);
@@ -1324,7 +1343,7 @@ void clGemini(BearSSL::WiFiClientSecure * client) {
     }
     else {
       // Send the requested file or the generated response
-      outSize = sendFile(client, GEMINI, pHost, pPath, pExt, pQuery, "index.gmi");
+      outSize = sendFile(client, GEMINI, pHost, pPath, pQuery, "index.gmi");
       // We can now safely break the loop
       break;
     }
@@ -1338,7 +1357,7 @@ void clGemini(BearSSL::WiFiClientSecure * client) {
 
 // Handle Spartan protocol
 void clSpartan(WiFiClient * client) {
-  char *pHost, *pPath, *pExt, *pQuery, *pLen, *pEOL;
+  char *pHost, *pPath, *pQuery, *pLen, *pEOL;
   long int lQuery;
   // Prepare the log
   getLocalTime(&logTime);
@@ -1427,7 +1446,7 @@ void clSpartan(WiFiClient * client) {
       }
     }
     // Send the requested file or the generated response
-    outSize = sendFile(client, SPARTAN, pHost, pPath, pExt, pQuery, "index.gmi");
+    outSize = sendFile(client, SPARTAN, pHost, pPath, pQuery, "index.gmi");
     // We can now safely break the loop
     break;
   }
@@ -1453,7 +1472,7 @@ void clGopher(WiFiClient * client) {
     // If last char is not zero, the line is not complete
     if (buf[len] != '\0') continue;
 
-    char *pPath, *pExt, *pQuery, *pEOL;
+    char *pPath, *pQuery, *pEOL;
     // Path might be empty, in this case will consider root ('/')
     if (buf[0] == '\r') {
       buf[0] = '/';
@@ -1491,7 +1510,7 @@ void clGopher(WiFiClient * client) {
         Serial.print(F("Query: ")); Serial.println(pQuery);
     */
 
-    outSize = sendFile(client, GOPHER, fqdn, pPath, pExt, pQuery, "gopher.map");
+    outSize = sendFile(client, GOPHER, fqdn, pPath, pQuery, "gopher.map");
     client->print("\r\n.\r\n");
     // We can now safely break the loop
     break;
@@ -1505,7 +1524,7 @@ void clGopher(WiFiClient * client) {
 
 // Handle HTTP protocol
 void clHTTP(WiFiClient * client) {
-  char *pMethod, *pPath, *pExt, *pQuery, *pProto, *pEOL;
+  char *pMethod, *pPath, *pQuery, *pProto, *pEOL;
   // Prepare the log
   getLocalTime(&logTime);
   logErrCode = 200;
@@ -1573,7 +1592,7 @@ void clHTTP(WiFiClient * client) {
       pQuery = pEOL;
 
     // Send the requested file or the generated response
-    outSize = sendFile(client, HTTP, NULL, pPath, pExt, pQuery, "index.gmi");
+    outSize = sendFile(client, HTTP, NULL, pPath, pQuery, "index.gmi");
     // We can now safely break the loop
     break;
   }
