@@ -18,7 +18,7 @@
 */
 
 // The DEBUG flag
-#define DEBUG
+//#define DEBUG
 
 //#define USE_UPNP
 
@@ -81,12 +81,12 @@ int spiCSPins[] = {D4, D8, D1, D2, D3, D0};
 // Protocols
 enum proto_t {GEMINI, SPARTAN, HTTP, GOPHER, _PROTO_ALL};
 // Pseudo-statuses
-enum status_t {ST_OK, ST_INPUT, ST_PASSWORD, ST_REDIR, ST_NOTFOUND, ST_INVALID, ST_SERVERERROR, _ST_ALL};
+enum status_t {ST_OK, ST_INPUT, ST_PASSWORD, ST_REDIR, ST_MOVED, ST_NOTFOUND, ST_INVALID, ST_SERVERERROR, _ST_ALL};
 int rspStatus[_PROTO_ALL][_ST_ALL] = {
-  {20, 10, 11, 30, 51, 59, 59},
-  {2, 2, 2, 3, 4, 4, 5},
-  {200, 200, 200, 200, 404, 500, 500},
-  {0, 0, 0, 0, 0, 0, 0}
+  {20, 10, 11, 30, 31, 51, 59, 59},
+  {2, 2, 2, 3, 3, 4, 4, 5},
+  {200, 200, 200, 200, 200, 404, 500, 500},
+  {0, 0, 0, 0, 0, 0, 0, 0}
 };
 
 // TLS server
@@ -994,9 +994,16 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
   file = SD.open(filePath, "r");
   if (file.isDirectory()) {
     file.close();
-    // Append a slash, if needed
-    if (filePath[strlen(filePath) - 1] != '/')
-      strcat(filePath, "/");
+    // Redirect to slash-ending path if directory
+    if (pPath[strlen(pPath) - 1] != '/') {
+      // Moved
+      strcat(pPath, "/");
+      logErrCode = sendHeader(client, proto, ST_MOVED, pPath);
+      // Destroy the file path string
+      delete (filePath);
+      // Return 0
+      return 0;
+    }
     // Keep this position, if it was a directory
     dirEnd = strlen(filePath);
     // Append the default file name
@@ -1504,11 +1511,11 @@ void clGopher(WiFiClient * client) {
       pQuery++;
     }
 
-
-    /*
-        Serial.print(F("Path: ")); Serial.println(pPath);
-        Serial.print(F("Query: ")); Serial.println(pQuery);
-    */
+#ifdef DEBUG
+    Serial.println();
+    Serial.print(F("Path : ")); Serial.println(pPath);
+    Serial.print(F("Query: ")); Serial.println(pQuery);
+#endif
 
     outSize = sendFile(client, GOPHER, fqdn, pPath, pQuery, "gopher.map");
     client->print("\r\n.\r\n");
