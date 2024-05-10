@@ -223,6 +223,32 @@ int readLine(File *file, char *buf, int maxLen = 1024) {
   return len;
 }
 
+// URI decoder
+void percentDecode(char *uri) {
+  char *p, *result;
+  int i = 0;
+  bool changed = false;
+  result = new char[strlen(uri) + 1];
+  if (!result)
+    return;
+  for (p = (char *)uri; *p != '\0'; p++) {
+    if (*p == '%' && isxdigit(*(p + 1)) && isxdigit(*(p + 2))) {
+      changed = true;
+      // Percent encoded hex: %xx
+      char tmp[] = { *(p + 1), *(p + 2), '\0' };
+      result[i++] = (char)strtol(tmp, NULL, 16);
+      p += 2;
+    }
+    else {
+      result[i++] = *p;
+    }
+  }
+  result[i] = '\0';
+  if (changed)
+    strcpy(uri, result);
+  delete(result);
+}
+
 // Load the certificate and the key from storage
 void loadCertKey() {
   File file;
@@ -452,19 +478,7 @@ void loadMimeTypes() {
 // TODO Need a timeout
 void setClock() {
   // https://www.gnu.org/software/libc/manual/html_node/TZ-Variable.html
-  const char *TZstr = "EET-2EEST,M3.5.0/3,M10.5.0/4";
-  //configTime(3 * 3600, 0, "pool.ntp.org", "time.nist.gov");
-
   configTime(tz, "pool.ntp.org", "time.nist.gov");
-
-  /*
-    sntp_stop();
-    sntp_setservername(0, "pool.ntp.org");
-    setenv("TZ", TZstr, 1);
-    tzset();
-    sntp_init();
-  */
-
   yield();
 
   Serial.print(F("NTP: Waiting for NTP time sync "));
@@ -500,7 +514,7 @@ bool upDuckDNS(char *subdomain, char *token) {
 
 // CallBack time function for SD
 time_t cbTime() {
-  return time(nullptr);
+  return time(NULL);
 }
 
 /**
@@ -782,7 +796,7 @@ int sendFeed(Stream * client, proto_t proto, char *path, char *pathFS) {
     // Different for different protocols
     switch (proto) {
       case GOPHER:
-        outSize += client->printf("0%4d-%02d-%02d %s\t%s/%s\t%s\t%d\r\n",
+        outSize += client->printf("%04d-%02d-%02d %s\t%s/%s\t%s\t%d\r\n",
                                   (stTime->tm_year) + 1900, (stTime->tm_mon) + 1, stTime->tm_mday, pTitle, path, tmpFile.name(), fqdn, 70);
         break;
       case GEMINI:
@@ -946,6 +960,7 @@ int receiveFile(Stream *client, char *pHost, char *pPath, char *plData, int plSi
 int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQuery, const char *pFile) {
   int outSize = 0;  // Total output size
   int dirEnd = 0;   // Index to directory name ending
+  int vhostEnd = 0; // Index to vhost name ending
   char *pName;      // The file name part of the path
   char *pExt;       // The file name extension
   File file;        // The file handler to test the path
@@ -985,6 +1000,8 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
     strcpy(filePath, "/");
     strcat(filePath, fqdn);
   }
+  // Keep this position
+  vhostEnd = strlen(filePath);
   // Append a slash, if needed
   if (filePath[strlen(filePath) - 1] != '/' and pPath[0] != '/')
     strcat(filePath, "/");
@@ -1142,6 +1159,40 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
     // Send the server status page
     logErrCode = sendHeader(client, proto, ST_PASSWORD, "Password:");
   }
+  else if (strcmp(pPath, "/admin/create-directory") == 0 and proto == GEMINI) {
+    // Ask for directory name if not specified
+    if (strlen(pQuery) == 0)
+      logErrCode = sendHeader(client, proto, ST_INPUT, "Directory (absolute path):");
+    else {
+      // Trim to vhost
+      filePath[vhostEnd] = '\0';
+      // Append a slash, if needed
+      if (pQuery[0] != '/')
+        strcat(filePath, "/");
+      // Append the specified directory name
+      strcat(filePath, pQuery);
+      SD.mkdir(filePath);
+      logErrCode = sendHeader(client, proto, ST_REDIR, &filePath[vhostEnd]);
+    }
+    // Destroy the file path string
+    delete (filePath);
+    // Return 0
+    return 0;
+  }
+  else if (strcmp(pPath, "/cpio") == 0) {
+    // Redirect to a date-based export URL
+    char bufTime[100];
+    struct tm* stTime;
+    time_t now = time(NULL);
+    stTime = localtime(&now);
+    sprintf(bufTime, "/%s-%04d%02d%02d-%02d%02d%02d.cpio",
+            host, (stTime->tm_year) + 1900, (stTime->tm_mon) + 1, stTime->tm_mday, stTime->tm_hour, stTime->tm_min, stTime->tm_sec);
+    logErrCode = sendHeader(client, proto, ST_REDIR, bufTime);
+    // Destroy the file path string
+    delete (filePath);
+    // Return 0
+    return 0;
+  }
   else if (strncmp(pExt, ".cpio", 5) == 0) {
     // The requested virtual file is a CPIO archive. Trim the filepath
     // to the file name and get the parent directory (it can also be a
@@ -1271,6 +1322,7 @@ void clGemini(BearSSL::WiFiClientSecure * client) {
     if (pQuery != NULL) {
       pQuery[0] = '\0';
       pQuery++;
+      percentDecode(pQuery);
     }
     else
       pQuery = pEOL;
@@ -1594,6 +1646,7 @@ void clHTTP(WiFiClient * client) {
     if (pQuery != NULL) {
       pQuery[0] = '\0';
       pQuery++;
+      percentDecode(pQuery);
     }
     else
       pQuery = pEOL;
