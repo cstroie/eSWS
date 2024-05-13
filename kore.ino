@@ -539,6 +539,25 @@ unsigned long uptime(char *buf, size_t len) {
   return upt;
 }
 
+// Copy a file from src to dst
+void copyFile(const char *src, const char *dst) {
+  File srcFile = SD.open(src, "r");
+  File dstFile = SD.open(dst, "w");
+  uint8_t buf[512];
+  while (srcFile.available()) {
+    int len = srcFile.read(buf, 512);
+    dstFile.write(buf, len);
+  }
+  dstFile.close();
+  srcFile.close();
+}
+
+// Move a file from src to dst
+void moveFile(const char *src, const char *dst) {
+  copyFile(src, dst);
+  SD.remove(src);
+}
+
 // Send the proper header according to protocol and return the real status
 int sendHeader(Stream *client, proto_t proto, status_t status, const char *pText) {
   uint16_t stCode = rspStatus[proto][status];
@@ -938,17 +957,34 @@ int receiveFile(Stream *client, char *pHost, char *pPath, char *plData, int plSi
     delete (filePath);
     return 0;
   }
-  // Move the temporary file
-  File srcFile = SD.open("/~titan~.tmp", "r");
-  File dstFile = SD.open(filePath, "w");
-  uint8_t buf[512];
-  while (srcFile.available()) {
-    int len = srcFile.read(buf, 512);
-    dstFile.write(buf, len);
+  // Archive the existing file
+  if (SD.exists(filePath)) {
+    char buf[20];
+    struct tm* stTime;
+    time_t now = time(NULL);
+    stTime = localtime(&now);
+    // Create a date-time base file name
+    sprintf(buf, "/%04d%02d%02d-%02d%02d%02d",
+            stTime->tm_year + 1900, stTime->tm_mon + 1, stTime->tm_mday,
+            stTime->tm_hour, stTime->tm_min, stTime->tm_sec);
+    // Create the archive file path
+    char *pthArchive = new char[strlen(filePath) + 30];
+    // Start from root
+    strcpy(pthArchive, "/archive");
+    // Append existing file path
+    strcat(pthArchive, filePath);
+    // Create a direcory with same name
+    SD.mkdir(pthArchive);
+    // Append the date-time file name
+    strcat(pthArchive, buf);
+    // Copy the existing file
+    copyFile(filePath, pthArchive);
+    // Destroy the file path string
+    delete (pthArchive);
   }
-  dstFile.close();
-  srcFile.close();
-  SD.remove("/~titan~.tmp");
+
+  // Move the temporary file
+  moveFile("/~titan~.tmp", filePath);
 
   // Destroy the file path string
   delete (filePath);
