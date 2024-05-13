@@ -78,7 +78,7 @@ enum status_t {ST_OK, ST_INPUT, ST_PASSWORD, ST_REDIR, ST_MOVED, ST_NOTFOUND, ST
 int rspStatus[_PROTO_ALL][_ST_ALL] = {
   {20, 10, 11, 30, 31, 51, 59, 59},
   {2, 2, 2, 3, 3, 4, 4, 5},
-  {200, 200, 200, 200, 200, 404, 500, 500},
+  {200, 200, 200, 301, 301, 404, 500, 500},
   {0, 0, 0, 0, 0, 0, 0, 0}
 };
 
@@ -545,12 +545,16 @@ int sendHeader(Stream *client, proto_t proto, status_t status, const char *pText
     case HTTP:
       if (status == ST_OK)
         client->printf("HTTP/1.0 %d OK\r\nContent-Type: %s; encoding=utf8\r\nConnection: close\r\n\r\n", stCode, pText);
+      else if (status == ST_MOVED or status == ST_REDIR)
+        client->printf("HTTP/1.0 %d Moved\r\nLocation: %s\r\nConnection: close\r\n\r\n", stCode, pText);
       else
         client->printf("HTTP/1.0 %d %s\r\nConnection: close\r\n\r\n", stCode, pText);
       break;
     case GOPHER:
-      if (status != ST_OK)
-        client->printf("%s\r\n", pText);
+      if (status == ST_MOVED or status == ST_REDIR)
+        client->printf("1Redirect to %s\t%s\t%s\t%d\r\n", pText, pText, cfgFQDN, 70);
+      else if (status != ST_OK)
+        client->printf("i%s\t\t%s\t%d\r\n", pText, cfgFQDN, 70);
       break;
   }
   // Return the status code
@@ -792,13 +796,13 @@ int sendFeed(Stream * client, proto_t proto, char *path, char *pathFS) {
     switch (proto) {
       case GOPHER:
         outSize += client->printf("%04d-%02d-%02d %s\t%s/%s\t%s\t%d\r\n",
-                                  (stTime->tm_year) + 1900, (stTime->tm_mon) + 1, stTime->tm_mday, pTitle, path, tmpFile.name(), cfgFQDN, 70);
+                                  stTime->tm_year + 1900, stTime->tm_mon + 1, stTime->tm_mday, pTitle, path, tmpFile.name(), cfgFQDN, 70);
         break;
       case GEMINI:
       case SPARTAN:
       case HTTP:
         outSize += client->printf("=> %s/%s\t%d-%02d-%02d %s\r\n",
-                                  path, tmpFile.name(), (stTime->tm_year) + 1900, (stTime->tm_mon) + 1, stTime->tm_mday, pTitle);
+                                  path, tmpFile.name(), stTime->tm_year + 1900, stTime->tm_mon + 1, stTime->tm_mday, pTitle);
         break;
     }
     // Close the file
@@ -997,7 +1001,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
   strcpy(filePath, "/");
   // Append the host name, as in request, or fall back to FQDN
   if (pHost == NULL)
-    // No host in request (Gopher, HTTP/1.0)
+    // No host in request (HTTP/1.0)
     strcat(filePath, cfgFQDN);
   else if (strncmp(cfgHOST, pHost, strlen(cfgHOST)) == 0 and strncmp(&pHost[strlen(cfgHOST)], ".local", 6) == 0)
     // Special case for .local
@@ -1055,9 +1059,8 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
   if (pExt == NULL)
     // Fallback to end of string
     pExt = &filePath[strlen(filePath)];
-
   // Check if the file exists
-  if (file.isFile() and strcmp(pQuery, "nofile") != 0) {
+  if (file.isFile() and strncmp(pQuery, "nofile", 7) != 0) {
     // Keep the file size
     outSize = file.size();
     // Detect mime type
@@ -1228,7 +1231,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
     // Restore the filePath
     pName[0] = '/';
   }
-  else if (strncmp(pName, "/feed.gmi", 9) == 0) {
+  else if (strncmp(pName, "/feed", 5) == 0) {
     // The requested virtual file is a gemini feed
     pName[0] = '\0';
     // Send the feed
@@ -1596,6 +1599,8 @@ void clGopher(WiFiClient * client) {
       pQuery[0] = '\0';
       pQuery++;
     }
+    else
+      pQuery = pEOL;
 
 #ifdef DEBUG
     Serial.println();
@@ -1617,7 +1622,7 @@ void clGopher(WiFiClient * client) {
 
 // Handle HTTP protocol
 void clHTTP(WiFiClient * client) {
-  char *pMethod, *pPath, *pQuery, *pProto, *pEOL;
+  char *pMethod, *pHost, *pPath, *pQuery, *pProto, *pEOL;
   // Prepare the log
   getLocalTime(&logTime);
   logErrCode = 200;
@@ -1642,6 +1647,8 @@ void clHTTP(WiFiClient * client) {
       // Trim the string
       pEOL[0] = '\0';
     }
+    // For now the host is empty
+    pHost = pEOL;
 
     // Print the first part of the log line
     logPrint(client->remoteIP());
@@ -1686,7 +1693,7 @@ void clHTTP(WiFiClient * client) {
       pQuery = pEOL;
 
     // Send the requested file or the generated response
-    outSize = sendFile(client, HTTP, NULL, pPath, pQuery, "index.gmi");
+    outSize = sendFile(client, HTTP, cfgFQDN, pPath, pQuery, "index.gmi");
     // We can now safely break the loop
     break;
   }
