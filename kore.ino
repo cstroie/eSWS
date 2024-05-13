@@ -616,7 +616,7 @@ int sendArchCPIO(Stream * client, proto_t proto, char *path) {
     return 0;
   }
   // Start with the header
-  logErrCode = sendHeader(client, proto, ST_OK, binMimeType);
+  logErrCode = sendHeader(client, proto, ST_OK, "application/x-cpio");
   // Open the directory
   File dir = SD.open(path);
   // Send its content
@@ -1330,6 +1330,9 @@ void clGemini(BearSSL::WiFiClientSecure * client) {
       pPath = &pHost[i + 1];
       pPath[0] = '/';
     }
+    // Lowercase path
+    for (char *p = pPath; *p; ++p)
+      *p = tolower(*p);
     // Find the port, if any
     pPort = strchr(pHost, ':');
     if (pPort == NULL)
@@ -1366,7 +1369,7 @@ void clGemini(BearSSL::WiFiClientSecure * client) {
       // Allow titan only for admin host
       if (*cfgAdminHost != 0 and
           strncmp(pHost, cfgAdminHost, strlen(cfgAdminHost)) != 0) {
-        logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Not allowed");
+        logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Titan not allowed for this host");
         break;
       }
       // Quick check the query
