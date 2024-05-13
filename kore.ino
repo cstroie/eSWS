@@ -24,21 +24,14 @@
 
 // Software name and version
 #define PROGNAME "kore"
-#define PROGVERS "0.3"
+#define PROGVERS "0.4"
 
 // Certificate and key
 #define SSL_CERT "/ssl/crt.pem"
 #define SSL_KEY "/ssl/key.pem"
 
-// WiFi credentials
-#define WIFI_CFG "/wifi.cfg"
-#define HOSTNAME "/hostname.cfg"
-#define DDNS_TOK "/duckdns.cfg"
-#define TITAN_TOK "/titan.cfg"
-#define TZ_CFG "/tz.cfg"
-
-// Mime types
-#define MIMETYPE "/mimetype.cfg"
+// Main configuartion file
+#define CFG_FILE "/kore.cfg"
 
 // LED configuration
 #define LEDinv (true)
@@ -119,21 +112,20 @@ WiFiServer srvSpartan(300);
 // Gopher
 WiFiServer srvGopher(70);
 
-// Networking stuff
-char *host;
-char *fqdn;
-char *ddns;
-char *cfgTitanToken;
-char *tz;
-char *ssid;
-char *pass;
+// Main buffer
 char buf[1025];
+
+// Main configuration
+char *cfgHOST, *cfgFQDN, *cfgAdminHost, *cfgTitanToken;
+char *cfgDuckDNS;
+char *cfgTimeZone;
+bool cfgMDNS = true;
 
 // Mime types list
 struct MimeTypeEntry {
   char *ext;
   char *mmt;
-  char gph;
+  char  gph;
 };
 // Dynamically allocated vector to keep the associations
 std::vector<MimeTypeEntry> mtList;
@@ -282,119 +274,144 @@ void loadCertKey() {
     Serial.println(F("GMI: No RSA key and/or certificate. Gemini server is disabled."));
 }
 
-// Load hostname configuration
-void setHostname() {
-  int len = 1024;
-  // Read the host name
-  Serial.print(F("SYS: Reading host name from "));
-  Serial.print(HOSTNAME);
-  Serial.print(F(" ... "));
-  File file = SD.open(HOSTNAME, "r");
-  if (file.isFile()) {
-    while (len >= 0) {
-      // Read one line from file
-      len = readLine(&file, buf, 256);
-      // Skip over empty lines
-      if (len == 0) continue;
-      fqdn = strdup(buf);
-      // Find the first occurence of '.' in FQDN
-      char *dom = strchr(buf, '.');
-      if (dom != NULL) {
-        dom[0] = '\0';
-        host = strdup(buf);
-      }
-      else
-        host = fqdn;
-      Serial.println(fqdn);
-      WiFi.hostname(host);
-      break;
-    }
+// Set the host name and FQDN
+void setHostName(char *str) {
+  Serial.print(F("SYS: Hostname: "));
+  cfgFQDN = strdup(str);
+  // Find the first occurence of '.' in FQDN
+  char *dom = strchr(str, '.');
+  if (dom != NULL) {
+    dom[0] = '\0';
+    cfgHOST = strdup(str);
   }
   else
-    Serial.println(F("failed."));
-  file.close();
+    cfgHOST = cfgFQDN;
+  Serial.println(cfgFQDN);
+  WiFi.hostname(cfgHOST);
 }
 
-// Load DuckDNS configuration
-void loadDuckDNS() {
-  int len = 1024;
-  // Read the DuckDNS token
-  Serial.print(F("DNS: Reading DuckDNS token from "));
-  Serial.print(DDNS_TOK);
-  Serial.print(F(" ... "));
-  File file = SD.open(DDNS_TOK, "r");
-  if (file.isFile()) {
-    while (len >= 0) {
-      // Read one line from file
-      len = readLine(&file, buf, 256);
-      // Skip over empty lines
-      if (len == 0) continue;
-      ddns = strdup(buf);
-      Serial.println(F("done."));
-      break;
+// Set the admin host name
+void setAdminHost(char *str) {
+  Serial.print(F("SYS: Admin hostname: "));
+  cfgAdminHost = strdup(str);
+  Serial.println(cfgAdminHost);
+}
+
+// Set the DuckDNS token
+void setDuckDNS(char *str) {
+  Serial.print(F("SYS: DuckDNS token: "));
+  cfgDuckDNS = strdup(str);
+  Serial.println(cfgDuckDNS);
+}
+
+// Set the titan token
+void setTitanToken(char *str) {
+  Serial.print(F("SYS: Titan token: "));
+  cfgTitanToken = strdup(str);
+  Serial.println(cfgTitanToken);
+}
+
+// Set the timezone
+void setTimeZone(char *str) {
+  Serial.print(F("SYS: Timezone: "));
+  cfgTimeZone = strdup(str);
+  Serial.println(cfgTimeZone);
+}
+
+// Set MDNS
+void setMDNS(char *str) {
+  Serial.print(F("DNS: MDNS: "));
+  if ((str[0] == 'n') or
+      (str[0] == 'N') or
+      (str[0] == '0')) {
+    cfgMDNS = false;
+    Serial.println(F("disabled"));
+  }
+  else {
+    cfgMDNS = true;
+    Serial.println(F("enabled"));
+  }
+}
+
+// Set WiFi authentication
+void setWiFiAuth(char *ssid) {
+  // Find the first occurence of ','
+  char *pass = strchr(ssid, ',');
+  if (pass != NULL) {
+    pass[0] = '\0';
+    pass++;
+    Serial.print(F("WFI: Add '")); Serial.print(ssid); Serial.print(F("' "));
+#ifdef DEBUG
+    Serial.print(F("with pass '")); Serial.print(pass); Serial.print(F("' "));
+#endif
+    Serial.println();
+    wifiMulti.addAP(ssid, pass);
+  }
+}
+
+// Set mime-type
+void setMimeType(char *ext) {
+  // Find the first occurence of ','
+  char *gph = strchr(ext, ',');
+  if (gph != NULL) {
+    gph[0] = '\0';
+    gph++;
+    // Find the second occurence of ','
+    char *mmt = strchr(gph, ',');
+    if (mmt != NULL) {
+      mmt[0] = '\0';
+      mmt++;
+      Serial.print(F("MIM: Add '")); Serial.print(mmt); Serial.print(F("' for '")); Serial.print(ext); Serial.println(F("' "));
+      MimeTypeEntry mtNew;
+      mtNew.ext = strdup(ext);
+      mtNew.gph = gph[0];
+      mtNew.mmt = strdup(mmt);
+      mtList.push_back(mtNew);
     }
   }
-  else
-    Serial.println(F("failed."));
-  file.close();
 }
 
-// Load titan:// token
-void loadTitanToken() {
-  int len = 1024;
-  // Read the titan:// token
-  Serial.print(F("GMI: Reading titan:// token from "));
-  Serial.print(TITAN_TOK);
-  Serial.print(F(" ... "));
-  File file = SD.open(TITAN_TOK, "r");
-  if (file.isFile()) {
-    while (len >= 0) {
-      // Read one line from file
-      len = readLine(&file, buf, 256);
-      // Skip over empty lines
-      if (len == 0) continue;
-      cfgTitanToken = strdup(buf);
-      Serial.println(F("done."));
-      break;
-    }
+// Trim the string and return the trimmed one
+char *trim_move(char *s) {
+  char *o = s;
+  size_t len = 0;
+  while (isspace((unsigned char) *s))
+    s++;
+  if (*s) {
+    char *p = s;
+    while (*p) p++;
+    while (isspace((unsigned char) * (--p)));
+    p[1] = '\0';
+    len = (size_t)(p - s + 1);
   }
-  else
-    Serial.println(F("failed."));
-  file.close();
+  return (char*)((s == o) ? s : memmove(o, s, len + 1));
 }
 
-// Load timezone configuration
-void loadTimeZone() {
-  int len = 1024;
-  // Read the timezone configuration
-  Serial.print(F("NTP: Reading timezone configuration from "));
-  Serial.print(TZ_CFG);
-  Serial.print(F(" ... "));
-  File file = SD.open(TZ_CFG, "r");
-  if (file.isFile()) {
-    while (len >= 0) {
-      // Read one line from file
-      len = readLine(&file, buf, 256);
-      // Skip over empty lines
-      if (len == 0) continue;
-      tz = strdup(buf);
-      Serial.println(tz);
-      break;
-    }
+// Trim the string and return the length
+size_t trim(char *s) {
+  size_t len = 0;
+  while (isspace((unsigned char) *s))
+    s++;
+  if (*s) {
+    char *p = s;
+    while (*p) p++;
+    while (isspace((unsigned char) * (--p)));
+    p[1] = '\0';
+    len = (size_t)(p - s);
   }
-  else
-    Serial.println(F("failed."));
-  file.close();
+  return len;
 }
 
-// Load WiFi configuration
-void initWiFi() {
+// Load configuration
+void loadConfig() {
   int len = 1024;
-  // Read the WiFi configuration
-  Serial.print(F("WFI: Reading WiFi configuration from "));
-  Serial.print(WIFI_CFG);
-  Serial.print(F(" ... "));
-  File file = SD.open(WIFI_CFG, "r");
+  char *pKey, *pVal;
+
+  // Read the main configuration file
+  Serial.print(F("SYS: Reading main configuration from "));
+  Serial.print(CFG_FILE);
+  Serial.println(F(" ... "));
+  File file = SD.open(CFG_FILE, "r");
   if (file.isFile()) {
     while (len >= 0) {
       // Read one line from file
@@ -403,82 +420,41 @@ void initWiFi() {
       if (len == 0) continue;
       // Skip over comment lines
       if (buf[0] == '#') continue;
-      // Find the SSID and the PASS, TAB-separated
-      ssid = strtok((char *)buf, "\t");
-      pass = strtok(NULL, "\r\n\t");
-      // Add SSID and PASS to WiFi Multi
-      if (ssid != NULL and pass != NULL) {
-        Serial.println();
-        Serial.print(F("WFI: Add '"));
-        Serial.print(ssid);
-        Serial.print(F("' "));
-#ifdef DEBUG
-        Serial.print(F("with pass '"));
-        Serial.print(pass);
-        Serial.print(F("' "));
-#endif
-        wifiMulti.addAP(ssid, pass);
+      // Find the key and value, separated by '='
+      pKey = strtok((char *)buf, "=");
+      if (trim(pKey) > 0) {
+        pVal = strtok(NULL, "\r\n");
+        if (pVal != NULL) {
+          // The value starts at the next char
+          pVal++;
+          if (trim(pVal) > 0) {
+            if      (!strcmp(pKey, "hostname")) setHostName(pVal);
+            else if (!strcmp(pKey, "admin"))    setAdminHost(pVal);
+            else if (!strcmp(pKey, "titan"))    setTitanToken(pVal);
+            else if (!strcmp(pKey, "ddns"))     setDuckDNS(pVal);
+            else if (!strcmp(pKey, "tz"))       setTimeZone(pVal);
+            else if (!strcmp(pKey, "wifi"))     setWiFiAuth(pVal);
+            else if (!strcmp(pKey, "mime"))     setMimeType(pVal);
+            else if (!strcmp(pKey, "mdns"))     setMDNS(pVal);
+          }
+        }
       }
     }
-    Serial.println();
+    // Shrink the mime-type vector now
+    mtList.shrink_to_fit();
   }
   else
     Serial.println(F("ERROR"));
   file.close();
 }
 
-// Load mime-types
-void loadMimeTypes() {
-  int len = 1024;
-  char *ext;
-  char *mmt;
-  char *gph;
-  // Read the mime-type definitions
-  Serial.print(F("MIM: Reading mime-types from "));
-  Serial.print(MIMETYPE);
-  Serial.print(F(" ... "));
-  File file = SD.open(MIMETYPE, "r");
-  if (file.isFile()) {
-    while (len >= 0) {
-      // Read one line from file
-      len = readLine(&file, buf, 256);
-      // Skip over empty lines
-      if (len == 0) continue;
-      // Skip over comment lines
-      if (buf[0] == '#') continue;
-      // Find the extension and the mime type, TAB-separated
-      ext = strtok((char *)buf, "\t");
-      gph = strtok(NULL, "\t");
-      mmt = strtok(NULL, "\r\n\t");
-      // Append to vector
-      if (ext != NULL and mmt != NULL) {
-        Serial.println();
-        Serial.print(F("MIM: Add '"));
-        Serial.print(mmt);
-        Serial.print(F("' for '"));
-        Serial.print(ext);
-        Serial.print(F("' "));
-        MimeTypeEntry mtNew;
-        mtNew.ext = strdup(ext);
-        mtNew.gph = gph[0];
-        mtNew.mmt = strdup(mmt);
-        mtList.push_back(mtNew);
-      }
-    }
-    // Shrink the vector now
-    mtList.shrink_to_fit();
-    Serial.println();
-  }
-  else
-    Serial.println(F("failed."));
-  file.close();
-}
+
 
 // Set time via NTP, as required for x.509 validation
 // TODO Need a timeout
 void setClock() {
   // https://www.gnu.org/software/libc/manual/html_node/TZ-Variable.html
-  configTime(tz, "pool.ntp.org", "time.nist.gov");
+  configTime(cfgTimeZone, "pool.ntp.org", "time.nist.gov");
   yield();
 
   Serial.print(F("NTP: Waiting for NTP time sync "));
@@ -816,7 +792,7 @@ int sendFeed(Stream * client, proto_t proto, char *path, char *pathFS) {
     switch (proto) {
       case GOPHER:
         outSize += client->printf("%04d-%02d-%02d %s\t%s/%s\t%s\t%d\r\n",
-                                  (stTime->tm_year) + 1900, (stTime->tm_mon) + 1, stTime->tm_mday, pTitle, path, tmpFile.name(), fqdn, 70);
+                                  (stTime->tm_year) + 1900, (stTime->tm_mon) + 1, stTime->tm_mday, pTitle, path, tmpFile.name(), cfgFQDN, 70);
         break;
       case GEMINI:
       case SPARTAN:
@@ -854,9 +830,9 @@ int sendStatusPage(Stream *client) {
   logErrCode = sendHeader(client, GEMINI, ST_OK, "text/gemini");
   outSize += client->print("# Server status\r\n\r\n");
   // Hostname
-  outSize += client->print(fqdn);
+  outSize += client->print(cfgFQDN);
   outSize += client->print("\t");
-  outSize += client->print(host);
+  outSize += client->print(cfgHOST);
   outSize += client->print(".local\r\n\r\n");
   // Uptime in seconds and text
   unsigned long ups = 0;
@@ -888,7 +864,7 @@ int receiveFile(Stream *client, char *pHost, char *pPath, char *plData, int plSi
     return 0;
   }
   // Virtual hosting, find the server root directory
-  int hostLen = strlen(fqdn);
+  int hostLen = strlen(cfgFQDN);
   // Find the longest host name
   if (pHost != NULL)
     if (hostLen < strlen(pHost))
@@ -900,10 +876,10 @@ int receiveFile(Stream *client, char *pHost, char *pPath, char *plData, int plSi
   // Append the host name, as in request, or fall back to FQDN
   if (pHost == NULL)
     // No host in request (Gopher, HTTP/1.0)
-    strcat(filePath, fqdn);
-  else if (strncmp(host, pHost, strlen(host)) == 0 and strncmp(&pHost[strlen(host)], ".local", 6) == 0)
+    strcat(filePath, cfgFQDN);
+  else if (strncmp(cfgHOST, pHost, strlen(cfgHOST)) == 0 and strncmp(&pHost[strlen(cfgHOST)], ".local", 6) == 0)
     // Special case for .local
-    strcat(filePath, host);
+    strcat(filePath, cfgHOST);
   else {
     // Use the requested host name
     strcat(filePath, pHost);
@@ -914,7 +890,7 @@ int receiveFile(Stream *client, char *pHost, char *pPath, char *plData, int plSi
     // If not, fallback to FQDN
     file.close();
     strcpy(filePath, "/");
-    strcat(filePath, fqdn);
+    strcat(filePath, cfgFQDN);
   }
   // Append a slash, if needed
   if (filePath[strlen(filePath) - 1] != '/' and pPath[0] != '/')
@@ -1008,7 +984,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
     return 0;
   }
   // Virtual hosting, find the server root directory
-  int hostLen = strlen(fqdn);
+  int hostLen = strlen(cfgFQDN);
   // Find the longest host name
   if (pHost != NULL)
     if (hostLen < strlen(pHost))
@@ -1020,10 +996,10 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
   // Append the host name, as in request, or fall back to FQDN
   if (pHost == NULL)
     // No host in request (Gopher, HTTP/1.0)
-    strcat(filePath, fqdn);
-  else if (strncmp(host, pHost, strlen(host)) == 0 and strncmp(&pHost[strlen(host)], ".local", 6) == 0)
+    strcat(filePath, cfgFQDN);
+  else if (strncmp(cfgHOST, pHost, strlen(cfgHOST)) == 0 and strncmp(&pHost[strlen(cfgHOST)], ".local", 6) == 0)
     // Special case for .local
-    strcat(filePath, host);
+    strcat(filePath, cfgHOST);
   else {
     // Use the requested host name
     strcat(filePath, pHost);
@@ -1034,7 +1010,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
     // If not, fallback to FQDN
     file.close();
     strcpy(filePath, "/");
-    strcat(filePath, fqdn);
+    strcat(filePath, cfgFQDN);
   }
   // Keep this position
   vhostEnd = strlen(filePath);
@@ -1166,7 +1142,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
               strcat(gPath, "/");
             // Write the line
             outSize += client->printf("%c%s\t%s\t%s\t%d\r\n",
-                                      gType, (char*)entry.name(), gPath, fqdn, 70);
+                                      gType, (char*)entry.name(), gPath, cfgFQDN, 70);
 
           }
           break;
@@ -1222,7 +1198,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
     time_t now = time(NULL);
     stTime = localtime(&now);
     sprintf(bufTime, "/%s-%04d%02d%02d-%02d%02d%02d.cpio",
-            host, (stTime->tm_year) + 1900, (stTime->tm_mon) + 1, stTime->tm_mday, stTime->tm_hour, stTime->tm_min, stTime->tm_sec);
+            cfgHOST, (stTime->tm_year) + 1900, (stTime->tm_mon) + 1, stTime->tm_mday, stTime->tm_hour, stTime->tm_min, stTime->tm_sec);
     logErrCode = sendHeader(client, proto, ST_REDIR, bufTime);
     // Destroy the file path string
     delete (filePath);
@@ -1374,6 +1350,12 @@ void clGemini(BearSSL::WiFiClientSecure * client) {
 
     // If the protocol is 'titan', we need to read the upcoming data. We will use the same buffer, after pEOL
     if (titan) {
+      // Allow titan only for admin host
+      if (strlen(cfgAdminHost) > 0 and
+          strncmp(pHost, cfgAdminHost, strlen(cfgAdminHost)) != 0) {
+        logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Not allowed");
+        break;
+      }
       // Quick check the query
       if (strlen(pQuery) <= 0) {
         logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Invalid parameters for titan");
@@ -1388,11 +1370,11 @@ void clGemini(BearSSL::WiFiClientSecure * client) {
         // Check if it has the form "key=value"
         pVal = strchr(pKey, '=');
         if (pVal != NULL) {
-          // Starting with the next char there is the value
+          // The value starts at the next char
           pVal++;
-          if      (strncmp(pKey, "mime", 4) == 0) pMime = pVal;
-          else if (strncmp(pKey, "token", 5) == 0) pToken = pVal;
-          else if (strncmp(pKey, "size", 4) == 0) plSize = strtol(pVal, NULL, 10);
+          if      (strncmp(pKey, "mime", 4) == 0)   pMime = pVal;
+          else if (strncmp(pKey, "token", 5) == 0)  pToken = pVal;
+          else if (strncmp(pKey, "size", 4) == 0)   plSize = strtol(pVal, NULL, 10);
         }
         // Next fragment
         pKey = strtok(NULL, ";");
@@ -1605,7 +1587,7 @@ void clGopher(WiFiClient * client) {
     Serial.print(F("Query: ")); Serial.println(pQuery);
 #endif
 
-    outSize = sendFile(client, GOPHER, fqdn, pPath, pQuery, "gopher.map");
+    outSize = sendFile(client, GOPHER, cfgFQDN, pPath, pQuery, "gopher.map");
     client->print("\r\n.\r\n");
     // We can now safely break the loop
     break;
@@ -1758,14 +1740,9 @@ void setup() {
   }
 
 
-  // Set hostname
-  setHostname();
-  // Load DuckDNS config
-  loadDuckDNS();
-  // Configure WiFi
-  initWiFi();
-  // Load the mime-types
-  loadMimeTypes();
+
+  // Load main configuration
+  loadConfig();
   // Configure secure server
   loadCertKey();
 #ifndef USE_EC
@@ -1777,10 +1754,6 @@ void setup() {
 #if defined(USE_CACHE)
   srvGemini.setCache(&sslCache);
 #endif
-  // Load time zone configuration
-  loadTimeZone();
-  // Load the titan:// token
-  loadTitanToken();
 }
 
 // Main Arduino loop
@@ -1794,17 +1767,19 @@ void loop() {
       Serial.print(F("NET: IP address: "));
       Serial.println(WiFi.localIP());
 
-      // Set up mDNS responder:
-      if (!MDNS.begin(host)) {
-        Serial.println(F("DNS: Error setting up MDNS"));
-      }
-      else {
-        if (haveRSAKeyCert)
-          MDNS.addService("gemini", "tcp", 1965);
-        MDNS.addService("spartan", "tcp", 300);
-        MDNS.addService("http", "tcp", 80);
-        MDNS.addService("gopher", "tcp", 70);
-        Serial.println(F("DNS: mDNS responder started"));
+      // Set up mDNS responder
+      if (cfgMDNS) {
+        if (!MDNS.begin(cfgHOST)) {
+          Serial.println(F("DNS: Error setting up MDNS"));
+        }
+        else {
+          if (haveRSAKeyCert)
+            MDNS.addService("gemini", "tcp", 1965);
+          MDNS.addService("spartan", "tcp", 300);
+          MDNS.addService("http", "tcp", 80);
+          MDNS.addService("gopher", "tcp", 70);
+          Serial.println(F("DNS: mDNS responder started"));
+        }
       }
 
 #ifdef USE_UPNP
@@ -1819,9 +1794,9 @@ void loop() {
 
       // Update DuckDNS
       Serial.print(F("DNS: Updating DuckDNS for domain \""));
-      Serial.print(host);
+      Serial.print(cfgHOST);
       Serial.print(F("\" ... "));
-      bool updated = upDuckDNS(host, ddns);
+      bool updated = upDuckDNS(cfgHOST, cfgDuckDNS);
       if (updated) Serial.println(F("done."));
       else Serial.println(F("failed."));
 
@@ -1832,7 +1807,7 @@ void loop() {
       if (haveRSAKeyCert) {
         srvGemini.begin();
         Serial.print(F("GMI: Gemini server '"));
-        Serial.print(host);
+        Serial.print(cfgHOST);
         Serial.print(F(".local' started on "));
         Serial.print(WiFi.localIP());
         Serial.print(":");
@@ -1840,21 +1815,21 @@ void loop() {
       };
       srvSpartan.begin();
       Serial.print(F("SPN: Spartan server '"));
-      Serial.print(host);
+      Serial.print(cfgHOST);
       Serial.print(F(".local' started on "));
       Serial.print(WiFi.localIP());
       Serial.print(":");
       Serial.println(300);
       srvGopher.begin();
       Serial.print(F("GPH: Gopher server '"));
-      Serial.print(host);
+      Serial.print(cfgHOST);
       Serial.print(F(".local' started on "));
       Serial.print(WiFi.localIP());
       Serial.print(":");
       Serial.println(70);
       srvHTTP.begin();
       Serial.print(F("HTP: HTTP server '"));
-      Serial.print(host);
+      Serial.print(cfgHOST);
       Serial.print(F(".local' started on "));
       Serial.print(WiFi.localIP());
       Serial.print(":");
@@ -1864,7 +1839,8 @@ void loop() {
     }
 
     // Do MDNS stuff
-    MDNS.update();
+    if (cfgMDNS)
+      MDNS.update();
 
     if (haveRSAKeyCert) {
       BearSSL::WiFiClientSecure client = srvGemini.accept();
@@ -1916,7 +1892,8 @@ void loop() {
   }
   else {
     Serial.println(F("WFI: WiFi disconnected"));
-    MDNS.end();
+    if (cfgMDNS)
+      MDNS.end();
     if (haveRSAKeyCert)
       srvGemini.stop();
     srvSpartan.stop();
