@@ -983,6 +983,8 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
     logErrCode = sendHeader(client, proto, ST_INVALID, "Invalid path");
     return 0;
   }
+  // Check if this is the admin host
+  bool isAdminHost = (*cfgAdminHost != 0 and strncmp(pHost, cfgAdminHost, strlen(cfgAdminHost)) == 0);
   // Virtual hosting, find the server root directory
   int hostLen = strlen(cfgFQDN);
   // Find the longest host name
@@ -1000,6 +1002,9 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
   else if (strncmp(cfgHOST, pHost, strlen(cfgHOST)) == 0 and strncmp(&pHost[strlen(cfgHOST)], ".local", 6) == 0)
     // Special case for .local
     strcat(filePath, cfgHOST);
+  else if (isAdminHost)
+    // Admin host
+    strcat(filePath, cfgFQDN);
   else {
     // Use the requested host name
     strcat(filePath, pHost);
@@ -1080,6 +1085,10 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
     // Send content
     sendFileContent(client, &file);
     file.close();
+    // Add admin footer for file if gemini
+    if (isAdminHost and strcmp(pExt, "gmi") == 0) {
+      client->print("---\r\n=> titan://. Edit page\r\n");
+    }
   }
   else if (dirEnd > 0) {
     // The request was for a directory and there is no directory index.
@@ -1135,7 +1144,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
             else {
               strcpy(gPath, pPath);
             }
-            if (strlen(pPath) > 1 and pPath[strlen(pPath) - 1] != '/')
+            if (*pPath != 0 and pPath[strlen(pPath) - 1] != '/')
               strcat(gPath, "/");
             strcat(gPath, entry.name());
             if (entry.isDirectory())
@@ -1151,7 +1160,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
         case HTTP:
           outSize += client->print("=> ");
           outSize += client->print(pPath);
-          if (strlen(pPath) > 1 and pPath[strlen(pPath) - 1] != '/')
+          if (*pPath != 0 and pPath[strlen(pPath) - 1] != '/')
             outSize += client->print("/");
           outSize += client->print(entry.name());
           if (entry.isDirectory())
@@ -1161,6 +1170,10 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
           outSize += client->print("\r\n");
           break;
       }
+    }
+    // Add admin footer for directory
+    if (isAdminHost) {
+      client->print("---\r\n=> /admin/create-directory Create directory\r\n");
     }
   }
   else if (strcmp(pPath, "/status.gmi") == 0 and proto == GEMINI) {
@@ -1173,7 +1186,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
   }
   else if (strcmp(pPath, "/admin/create-directory") == 0 and proto == GEMINI) {
     // Ask for directory name if not specified
-    if (strlen(pQuery) == 0)
+    if (*pQuery == 0)
       logErrCode = sendHeader(client, proto, ST_INPUT, "Directory (absolute path):");
     else {
       // Trim to vhost
@@ -1351,13 +1364,13 @@ void clGemini(BearSSL::WiFiClientSecure * client) {
     // If the protocol is 'titan', we need to read the upcoming data. We will use the same buffer, after pEOL
     if (titan) {
       // Allow titan only for admin host
-      if (strlen(cfgAdminHost) > 0 and
+      if (*cfgAdminHost != 0 and
           strncmp(pHost, cfgAdminHost, strlen(cfgAdminHost)) != 0) {
         logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Not allowed");
         break;
       }
       // Quick check the query
-      if (strlen(pQuery) <= 0) {
+      if (*pQuery == 0) {
         logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Invalid parameters for titan");
         break;
       }
