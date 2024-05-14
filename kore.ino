@@ -26,12 +26,12 @@
 #define PROGNAME "kore"
 #define PROGVERS "0.4"
 
+// Main configuration file
+#define CFG_FILE "/kore.cfg"
+
 // Certificate and key
 #define SSL_CERT "/ssl/crt.pem"
 #define SSL_KEY "/ssl/key.pem"
-
-// Main configuartion file
-#define CFG_FILE "/kore.cfg"
 
 // LED configuration
 #define LEDinv (true)
@@ -54,6 +54,7 @@
 #include <TZ.h>
 #include <sntp.h>
 #include <SPI.h>
+
 #include <SD.h>
 
 // UPnP
@@ -65,11 +66,9 @@ TinyUPnP *tinyUPnP = new TinyUPnP(5000);
 // WiFi multiple access points
 ESP8266WiFiMulti wifiMulti;
 
-// SD card CS pins
+// SD card CS pins to test
 int spiCS = -1;
-int spiCSPins[] = {D4, D8, D1, D2, D3, D0};
-
-
+int spiCSPins[] = {D8, D4};
 
 // Protocols
 enum proto_t {GEMINI, SPARTAN, HTTP, GOPHER, _PROTO_ALL};
@@ -242,12 +241,12 @@ void percentDecode(char *uri) {
 }
 
 // Load the certificate and the key from storage
-void loadCertKey() {
+bool loadCertKey() {
   File file;
   Serial.print(F("SYS: Reading SSL certificate from "));
   Serial.print(SSL_CERT);
   Serial.print(F(" ... "));
-  file = SD.open(SSL_CERT, "r");
+  file = SD.open(SSL_CERT, FILE_READ);
   if (file.isFile()) {
     Serial.println(F("done."));
     srvCert = new BearSSL::X509List(file, file.size());
@@ -260,7 +259,7 @@ void loadCertKey() {
   Serial.print(F("SYS: Reading SSL key from "));
   Serial.print(SSL_KEY);
   Serial.print(F(" ... "));
-  file = SD.open(SSL_KEY, "r");
+  file = SD.open(SSL_KEY, FILE_READ);
   if (file.isFile()) {
     Serial.println(F("done."));
     srvKey = new BearSSL::PrivateKey(file, file.size());
@@ -270,8 +269,7 @@ void loadCertKey() {
     Serial.println(F("failed."));
   }
   file.close();
-  if (!haveRSAKeyCert)
-    Serial.println(F("GMI: No RSA key and/or certificate. Gemini server is disabled."));
+  return haveRSAKeyCert;
 }
 
 // Set the host name and FQDN
@@ -403,16 +401,18 @@ size_t trim(char *s) {
 }
 
 // Load configuration
-void loadConfig() {
+bool loadConfig() {
+  bool result = false;
   int len = 1024;
   char *pKey, *pVal;
 
   // Read the main configuration file
   Serial.print(F("SYS: Reading main configuration from "));
   Serial.print(CFG_FILE);
-  Serial.println(F(" ... "));
-  File file = SD.open(CFG_FILE, "r");
+  Serial.print(F(" ... "));
+  File file = SD.open(CFG_FILE, FILE_READ);
   if (file.isFile()) {
+    Serial.println();
     while (len >= 0) {
       // Read one line from file
       len = readLine(&file, buf, 256);
@@ -442,10 +442,13 @@ void loadConfig() {
     }
     // Shrink the mime-type vector now
     mtList.shrink_to_fit();
+    // Return success
+    result = true;
   }
   else
-    Serial.println(F("ERROR"));
+    Serial.println(F("failed."));
   file.close();
+  return result;
 }
 
 
@@ -517,8 +520,8 @@ unsigned long uptime(char *buf, size_t len) {
 
 // Copy a file from src to dst
 void copyFile(const char *src, const char *dst) {
-  File srcFile = SD.open(src, "r");
-  File dstFile = SD.open(dst, "w");
+  File srcFile = SD.open(src, FILE_READ);
+  File dstFile = SD.open(dst, FILE_WRITE);
   uint8_t buf[512];
   while (srcFile.available()) {
     int len = srcFile.read(buf, 512);
@@ -736,7 +739,7 @@ int sendFeed(Stream * client, proto_t proto, char *path, char *pathFS) {
   // Check if there is a feed header file
   strcpy(tmpPath, pathFS);
   strcat(tmpPath, "/feed-hdr.gmi");
-  tmpFile = SD.open(tmpPath, "r");
+  tmpFile = SD.open(tmpPath, FILE_READ);
   outSize += sendFileContent(client, &tmpFile);
   tmpFile.close();
 
@@ -814,7 +817,7 @@ int sendFeed(Stream * client, proto_t proto, char *path, char *pathFS) {
   // Check if there is a feed footer file
   strcpy(tmpPath, pathFS);
   strcat(tmpPath, "/feed-ftr.gmi");
-  tmpFile = SD.open(tmpPath, "r");
+  tmpFile = SD.open(tmpPath, FILE_READ);
   outSize += sendFileContent(client, &tmpFile);
   tmpFile.close();
 
@@ -889,7 +892,7 @@ int receiveFile(Stream *client, char *pHost, char *pPath, char *plData, int plSi
     strcat(filePath, pHost);
   }
   // Check the virtual host directory exists
-  file = SD.open(filePath, "r");
+  file = SD.open(filePath, FILE_READ);
   if (!file.isDirectory()) {
     // If not, fallback to FQDN
     file.close();
@@ -902,7 +905,7 @@ int receiveFile(Stream *client, char *pHost, char *pPath, char *plData, int plSi
   // Append the path
   strcat(filePath, pPath);
   // If directory, return error
-  file = SD.open(filePath, "r");
+  file = SD.open(filePath, FILE_READ);
   if (file.isDirectory()) {
     file.close();
     logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Path is a directory");
@@ -913,7 +916,7 @@ int receiveFile(Stream *client, char *pHost, char *pPath, char *plData, int plSi
   // Total bytes received
   int total = 0;
   // Open the temporary file for writing
-  File wrFile = SD.open("/~titan~.tmp", "w");
+  File wrFile = SD.open("/~titan~.tmp", FILE_WRITE);
   // If the file is available, write to it
   if (wrFile) {
     int toRead = plSize;
@@ -1014,7 +1017,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
     strcat(filePath, pHost);
   }
   // Check the virtual host directory exists
-  file = SD.open(filePath, "r");
+  file = SD.open(filePath, FILE_READ);
   if (!file.isDirectory()) {
     // If not, fallback to FQDN
     file.close();
@@ -1029,7 +1032,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
   // Append the path
   strcat(filePath, pPath);
   // Check if it's directory requested and append default file name for protocol
-  file = SD.open(filePath, "r");
+  file = SD.open(filePath, FILE_READ);
   if (file.isDirectory()) {
     file.close();
     // Redirect to slash-ending path if directory
@@ -1046,7 +1049,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
     dirEnd = strlen(filePath);
     // Append the default file name
     strcat(filePath, pFile);
-    file = SD.open(filePath, "r");
+    file = SD.open(filePath, FILE_READ);
   };
   // Find the requested file name in filesystem path
   pName = strrchr(filePath, '/');
@@ -1704,6 +1707,18 @@ void clHTTP(WiFiClient * client) {
   client->stop();
 }
 
+void reboot() {
+  unsigned long timeOut = millis() + 1000;
+  while (millis() < timeOut) {
+    // Flash the led
+    digitalWrite(LED, HIGH ^ LEDinv); delay(40);
+    digitalWrite(LED, LOW  ^ LEDinv); delay(50);
+    digitalWrite(LED, HIGH ^ LEDinv); delay(40);
+    digitalWrite(LED, LOW  ^ LEDinv); delay(200);
+  }
+  // Infinite loop to trigger the watchdog
+  while (true) {};
+}
 
 // Main Arduino setup function
 void setup() {
@@ -1724,59 +1739,61 @@ void setup() {
   // SPI
   SPI.begin();
   // Init SD card
-  Serial.print(F("SYS: Searching SD card, trying CS "));
-  for (auto cs : spiCSPins) {
-    Serial.print(cs);
-    Serial.print(" ");
-    if (SD.begin(cs)) {
-      spiCS = cs;
-      break;
+  for (int i = 10; i > 0 and spiCS < 0; i--) {
+    for (auto cs : spiCSPins) {
+      Serial.print(F("SYS: Searching SD card, trying CS at GPIO "));
+      Serial.print(cs);
+      Serial.print(" ... ");
+      if (SD.begin(cs)) {
+        Serial.println(F("found!"));
+        spiCS = cs;
+        break;
+      }
+      Serial.println("failed.");
+      delay(100);
     }
-    delay(100);
+    delay(300);
   }
+  // Check if we found the CS
   if (spiCS > -1) {
-    Serial.println(F("found!"));
     switch (SD.type()) {
-      case 1: Serial.print(F("SD1")); break;
-      case 2: Serial.print(F("SD2")); break;
-      case 3: Serial.print(F("SDHC")); break;
-      default: Serial.println(F("Unknown"));
+      case 1:   Serial.print(F("SD1")); break;
+      case 2:   Serial.print(F("SD2")); break;
+      case 3:   Serial.print(F("SDHC")); break;
+      default:  Serial.println(F("Unknown"));
     }
     Serial.printf(" FAT %d %dMb\r\n", SD.fatType(), SD.size64() / 1048576);
     // Set time callback
     SD.setTimeCallback(cbTime);
   }
   else {
-    Serial.println(F("failed!"));
-    while (true) {
-      yield();
-      // Flash the led
-      digitalWrite(LED, HIGH ^ LEDinv);
-      delay(50);
-      digitalWrite(LED, LOW ^ LEDinv);
-      delay(50);
-      digitalWrite(LED, HIGH ^ LEDinv);
-      delay(50);
-      digitalWrite(LED, LOW ^ LEDinv);
-      delay(250);
-    }
+    Serial.println(F("No SD card found. Reset."));
+    reboot();
   }
 
-
-
   // Load main configuration
-  loadConfig();
+  if (!loadConfig()) {
+    Serial.println(F("ERR: Error reading the main configuration file."));
+    Serial.println(F("ERR: See documentation to create one."));
+    reboot();
+  }
+
   // Configure secure server
-  loadCertKey();
+  if (!loadCertKey()) {
+    Serial.println(F("GMI: No RSA key and/or certificate. Gemini server is disabled."));
+    Serial.println(F("GMI: See documentation for instructions to create them."));
+  }
+  else {
 #ifndef USE_EC
-  srvGemini.setRSACert(srvCert, srvKey);
+    srvGemini.setRSACert(srvCert, srvKey);
 #else
-  srvGemini.setECCert(srvCert, BR_KEYTYPE_KEYX | BR_KEYTYPE_SIGN, srvKey);
+    srvGemini.setECCert(srvCert, BR_KEYTYPE_KEYX | BR_KEYTYPE_SIGN, srvKey);
 #endif
-  // Set the server's cache
+    // Set the server's cache
 #if defined(USE_CACHE)
-  srvGemini.setCache(&sslCache);
+    srvGemini.setCache(&sslCache);
 #endif
+  }
 }
 
 // Main Arduino loop
@@ -1819,9 +1836,10 @@ void loop() {
       Serial.print(F("DNS: Updating DuckDNS for domain \""));
       Serial.print(cfgHOST);
       Serial.print(F("\" ... "));
-      bool updated = upDuckDNS(cfgHOST, cfgDuckDNS);
-      if (updated) Serial.println(F("done."));
-      else Serial.println(F("failed."));
+      if (upDuckDNS(cfgHOST, cfgDuckDNS))
+        Serial.println(F("done."));
+      else
+        Serial.println(F("failed."));
 
       // Set clock
       setClock();
