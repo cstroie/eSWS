@@ -44,8 +44,6 @@
 #endif
 
 
-
-
 #include <ESP8266WiFi.h>
 #include <ESP8266WiFiMulti.h>
 #include <ESP8266HTTPClient.h>
@@ -56,6 +54,10 @@
 #include <SPI.h>
 
 #include <SD.h>
+
+
+using namespace BearSSL;
+
 
 // UPnP
 #ifdef USE_UPNP
@@ -86,7 +88,6 @@ int rspStatus[_PROTO_ALL][_ST_ALL] = {
 BearSSL::WiFiServerSecure srvGemini(1965);
 BearSSL::X509List *srvCert;
 BearSSL::PrivateKey *srvKey;
-// #define USE_EC       // Enable Elliptic Curve signed cert
 #define CACHE_SIZE 5  // Number of sessions to cache.
 #define USE_CACHE     // Enable SSL session caching.
 // Caching SSL sessions shortens the length of the SSL handshake.
@@ -521,7 +522,7 @@ unsigned long uptime(char *buf, size_t len) {
 // Copy a file from src to dst
 void copyFile(const char *src, const char *dst) {
   File srcFile = SD.open(src, FILE_READ);
-  File dstFile = SD.open(dst, FILE_WRITE);
+  File dstFile = SD.open(dst, "w");
   uint8_t buf[512];
   while (srcFile.available()) {
     int len = srcFile.read(buf, 512);
@@ -916,7 +917,7 @@ int receiveFile(Stream *client, char *pHost, char *pPath, char *plData, int plSi
   // Total bytes received
   int total = 0;
   // Open the temporary file for writing
-  File wrFile = SD.open("/~titan~.tmp", FILE_WRITE);
+  File wrFile = SD.open("/~titan~.tmp", "w");
   // If the file is available, write to it
   if (wrFile) {
     int toRead = plSize;
@@ -1092,9 +1093,9 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
     sendFileContent(client, &file);
     file.close();
     // Add admin footer for file if gemini
-    if (isAdminHost and strcmp(pExt, "gmi") == 0) {
-      client->print("---\r\n=> titan://. Edit page\r\n");
-    }
+    //if (isAdminHost and strcmp(pExt, "gmi") == 0) {
+    //  client->print("---\r\n=> titan://. Edit page\r\n");
+    //}
   }
   else if (dirEnd > 0) {
     // The request was for a directory and there is no directory index.
@@ -1178,15 +1179,15 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
       }
     }
     // Add admin footer for directory
-    if (isAdminHost) {
-      client->print("---\r\n=> /admin/create-directory Create directory\r\n");
-    }
+    //if (isAdminHost) {
+    //  client->print("---\r\n=> /admin/create-directory Create directory\r\n");
+    //}
   }
-  else if (strcmp(pPath, "/status.gmi") == 0 and proto == GEMINI) {
+  else if (strcmp(pPath, "/status") == 0 and proto == GEMINI) {
     // Send the server status page
     outSize = sendStatusPage(client);
   }
-  else if (strcmp(pPath, "/input.gmi") == 0 and proto == GEMINI) {
+  else if (strcmp(pPath, "/input") == 0 and proto == GEMINI) {
     // Send the server status page
     logErrCode = sendHeader(client, proto, ST_PASSWORD, "Password:");
   }
@@ -1217,7 +1218,8 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
     time_t now = time(NULL);
     stTime = localtime(&now);
     sprintf(bufTime, "/%s-%04d%02d%02d-%02d%02d%02d.cpio",
-            cfgHOST, (stTime->tm_year) + 1900, (stTime->tm_mon) + 1, stTime->tm_mday, stTime->tm_hour, stTime->tm_min, stTime->tm_sec);
+            cfgHOST, stTime->tm_year + 1900, stTime->tm_mon + 1, stTime->tm_mday,
+            stTime->tm_hour, stTime->tm_min, stTime->tm_sec);
     logErrCode = sendHeader(client, proto, ST_REDIR, bufTime);
     // Destroy the file path string
     delete (filePath);
@@ -1784,11 +1786,7 @@ void setup() {
     Serial.println(F("GMI: See documentation for instructions to create them."));
   }
   else {
-#ifndef USE_EC
     srvGemini.setRSACert(srvCert, srvKey);
-#else
-    srvGemini.setECCert(srvCert, BR_KEYTYPE_KEYX | BR_KEYTYPE_SIGN, srvKey);
-#endif
     // Set the server's cache
 #if defined(USE_CACHE)
     srvGemini.setCache(&sslCache);
@@ -1846,6 +1844,7 @@ void loop() {
 
       // Start accepting connections
       if (haveRSAKeyCert) {
+        //srvGemini.setClientTrustAnchor(srvCert);
         srvGemini.begin();
         Serial.print(F("GMI: Gemini server '"));
         Serial.print(cfgHOST);
@@ -1884,15 +1883,14 @@ void loop() {
       MDNS.update();
 
     if (haveRSAKeyCert) {
+      srvGemini.setNoDelay(true);
       BearSSL::WiFiClientSecure client = srvGemini.accept();
       if (client) {
+
         // LED on
         //digitalWrite(LED, HIGH ^ LEDinv);
 
-        //std::vector<uint16_t> cyphers = { BR_TLS_RSA_WITH_AES_256_CBC_SHA256, BR_TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA, BR_TLS_RSA_WITH_3DES_EDE_CBC_SHA };
-        //client.setCiphers(cyphers);
-
-        //client.setFingerprint("39b2204993bab61373aed82c24a20919b4bb7a9fb6c9342452b3e5f6836848de");
+        //client.setFingerprint("39b2204993bab61373aed82c24a20919b4bb7a9f");
 
         // Handle the client
         clGemini(&client);
