@@ -178,13 +178,13 @@ int readLine(Stream *stream, char *buf, int maxLen = 1024) {
 
 // Read one line from file, delimited by the specified char,
 // with maximum of specified lenght, and return the lenght of the read string
-int readLine(File *file, char *buf, int maxLen = 1024) {
+int readLine(File *file, char *buf, int maxLen = 1024, bool ctrlChr = false) {
   int len = 0;
   while (file->available()) {
     // Read one char
     char c = file->read();
     // Line must start with a non-control character
-    if (len == 0 and c < 32) continue;
+    if (len == 0 and c < 32 and ctrlChr == false) continue;
     // Limit line length
     if (len >= maxLen - 1) {
       // Return an error code for line too long
@@ -536,6 +536,96 @@ void copyFile(const char *src, const char *dst) {
 void moveFile(const char *src, const char *dst) {
   copyFile(src, dst);
   SD.remove(src);
+}
+
+// Archive a file
+void archFile(const char *file) {
+  if (SD.exists(file)) {
+    char buf[20];
+    struct tm* stTime;
+    time_t now = time(NULL);
+    stTime = localtime(&now);
+    // Create a date-time base file name
+    sprintf(buf, "/%04d%02d%02d-%02d%02d%02d",
+            stTime->tm_year + 1900, stTime->tm_mon + 1, stTime->tm_mday,
+            stTime->tm_hour, stTime->tm_min, stTime->tm_sec);
+    // Create the archive file path
+    char *arch = new char[strlen(file) + 30];
+    // Start from root
+    strcpy(arch, "/archive");
+    // Append existing file path
+    strcat(arch, file);
+    // Create a direcory with same name
+    SD.mkdir(arch);
+    // Append the date-time file name
+    strcat(arch, buf);
+    // Copy the existing file
+    copyFile(file, arch);
+    // Destroy the file path string
+    delete (arch);
+  }
+}
+
+// Add a tinylog entry to a hardcoded file path
+int addTinyLog(char *filePath, char *entry) {
+  int outSize = 0;
+  int len, plen = 0;
+  uint8_t rbuf[256];
+  // Machine states
+  enum state_t {BEFORE, INSERT, AFTER};
+  state_t state;
+  // Prepare a date-time header YYYY-MM-DD HH:MM TZ
+  char bufTime[30];
+  struct tm* stTime;
+  time_t now = time(NULL);
+  stTime = localtime(&now);
+  strftime(bufTime, 30, "## %F %R %Z\r\n", stTime);
+  // Open the temporary file
+  File dst = SD.open("/~tinylog.tmp", "w");
+  // Open the log file and read it line by line until the first second level header
+  File src = SD.open(filePath, FILE_READ);
+  if (dst.isFile() and src.isFile()) {
+    // Initial state
+    state = BEFORE;
+    // Repeat until we find the first second-level header
+    while (state != INSERT) {
+      // Read one line from file, accept control character
+      len = readLine(&src, (char*)rbuf, 256, true);
+      // Find the first second-level header or EOF
+      if ((((strncmp((const char*)rbuf, "## ", 3) == 0) and plen >= 0) or (len == -2)) and (state == BEFORE)) {
+        state = INSERT;
+        // Write a new header
+        outSize += dst.print(bufTime);
+        // Write the content
+        outSize += dst.print(entry);
+        // Write two newlines
+        outSize += dst.print("\r\n\r\n");
+      }
+      // Write the buffer (full, if incomplete line)
+      outSize += dst.write(rbuf, (len == -1) ? 256 : len);
+      // Write a new line if no incomplete line
+      if (len >= 0)
+        outSize += dst.print("\r\n");
+      // Remember this line length
+      plen = len;
+    }
+    // Move to final state, no more processing
+    state = AFTER;
+    // Copy the rest of the file
+    while (src.available()) {
+      len = src.read(rbuf, 256);
+      outSize += dst.write(rbuf, len);
+    }
+  }
+  // Close the files
+  src.close();
+  dst.close();
+  // Archive the original file
+  archFile(filePath);
+  // Move the temporary file to final position
+  moveFile("/~tinylog.tmp", filePath);
+  // Return the new log file size
+  return outSize;
 }
 
 // Send the proper header according to protocol and return the real status
@@ -942,31 +1032,7 @@ int receiveFile(Stream *client, char *pHost, char *pPath, char *plData, int plSi
     return 0;
   }
   // Archive the existing file
-  if (SD.exists(filePath)) {
-    char buf[20];
-    struct tm* stTime;
-    time_t now = time(NULL);
-    stTime = localtime(&now);
-    // Create a date-time base file name
-    sprintf(buf, "/%04d%02d%02d-%02d%02d%02d",
-            stTime->tm_year + 1900, stTime->tm_mon + 1, stTime->tm_mday,
-            stTime->tm_hour, stTime->tm_min, stTime->tm_sec);
-    // Create the archive file path
-    char *pthArchive = new char[strlen(filePath) + 30];
-    // Start from root
-    strcpy(pthArchive, "/archive");
-    // Append existing file path
-    strcat(pthArchive, filePath);
-    // Create a direcory with same name
-    SD.mkdir(pthArchive);
-    // Append the date-time file name
-    strcat(pthArchive, buf);
-    // Copy the existing file
-    copyFile(filePath, pthArchive);
-    // Destroy the file path string
-    delete (pthArchive);
-  }
-
+  archFile(filePath);
   // Move the temporary file
   moveFile("/~titan~.tmp", filePath);
 
@@ -1244,6 +1310,25 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
     // Restore the filePath
     pName[0] = '/';
   }
+  else if (strcmp(pPath, "/tinylog/new") == 0 and proto == GEMINI) {
+    // Add a new entry to the tinylog
+    if (*pQuery == 0)
+      logErrCode = sendHeader(client, proto, ST_INPUT, "Tinylog entry:");
+    else {
+      // Trim file path to vhost
+      filePath[vhostEnd] = '\0';
+      // Append the tinylog filename
+      strcat(filePath, "/tinylog.gmi");
+      // Add a new entry
+      outSize = addTinyLog(filePath, pQuery);
+      // Redirect to tinylog file
+      logErrCode = sendHeader(client, proto, ST_REDIR, "/tinylog.gmi");
+    }
+    // Destroy the file path string
+    delete (filePath);
+    // Return 0
+    return 0;
+  }
   else
     // File not found
     logErrCode = sendHeader(client, proto, ST_NOTFOUND, "File not found");
@@ -1338,9 +1423,6 @@ void clGemini(BearSSL::WiFiClientSecure * client) {
       pPath = &pHost[i + 1];
       pPath[0] = '/';
     }
-    // Lowercase path
-    for (char *p = pPath; *p; ++p)
-      *p = tolower(*p);
     // Find the port, if any
     pPort = strchr(pHost, ':');
     if (pPort == NULL)
@@ -1362,6 +1444,9 @@ void clGemini(BearSSL::WiFiClientSecure * client) {
     }
     else
       pQuery = pEOL;
+    // Lowercase path
+    for (char *p = pPath; *p; ++p)
+      *p = tolower(*p);
 
 #ifdef DEBUG
     Serial.println();
@@ -1375,11 +1460,13 @@ void clGemini(BearSSL::WiFiClientSecure * client) {
     // If the protocol is 'titan', we need to read the upcoming data. We will use the same buffer, after pEOL
     if (titan) {
       // Allow titan only for admin host
-      if (*cfgAdminHost != 0 and
+      /*
+        if (*cfgAdminHost != 0 and
           strncmp(pHost, cfgAdminHost, strlen(cfgAdminHost)) != 0) {
         logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Titan not allowed for this host");
         break;
-      }
+        }
+      */
       // Quick check the query
       if (*pQuery == 0) {
         logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Invalid parameters for titan");
@@ -1514,6 +1601,9 @@ void clSpartan(WiFiClient * client) {
       // Convert to long integer
       lQuery = strtol(pLen, NULL, 10);
     }
+    // Lowercase path
+    for (char *p = pPath; *p; ++p)
+      *p = tolower(*p);
 
 #ifdef DEBUG
     Serial.println();
@@ -1546,6 +1636,8 @@ void clSpartan(WiFiClient * client) {
         break;
       }
     }
+    else
+      pQuery = pEOL;
     // Send the requested file or the generated response
     outSize = sendFile(client, SPARTAN, pHost, pPath, pQuery, "index.gmi");
     // We can now safely break the loop
