@@ -86,6 +86,7 @@ int rspStatus[_PROTO_ALL][_ST_ALL] = {
 // TLS server
 // openssl req -new -x509 -keyout key.pem -out crt.pem -days 3650 -nodes -subj "/C=RO/ST=Bucharest/L=Bucharest/O=Eridu/OU=IT/CN=koremoon.duckdns.org" -addext "subjectAltName=DNS:eridu.eu.org,DNS:kore.eridu.eu.org,DNS:koremoon.duckdns.org,DNS:*.koremoon.duckdns.org,DNS:koremoon.localDNS:kore.local,DNS:localhost"
 BearSSL::WiFiServerSecure srvGemini(1965);
+BearSSL::WiFiServerSecure srvGeminiAuth(1969);
 BearSSL::X509List *srvCert;
 BearSSL::PrivateKey *srvKey;
 #define CACHE_SIZE 5  // Number of sessions to cache.
@@ -546,9 +547,7 @@ void archFile(const char *file) {
     time_t now = time(NULL);
     stTime = localtime(&now);
     // Create a date-time base file name
-    sprintf(buf, "/%04d%02d%02d-%02d%02d%02d",
-            stTime->tm_year + 1900, stTime->tm_mon + 1, stTime->tm_mday,
-            stTime->tm_hour, stTime->tm_min, stTime->tm_sec);
+    strftime(buf, 20, "/%Y%m%d-%H%M%S", stTime);
     // Create the archive file path
     char *arch = new char[strlen(file) + 30];
     // Start from root
@@ -1358,8 +1357,8 @@ void logPrint(int code, int size) {
   Serial.println(size);
 }
 
-// Handle Gemini protocol
-void clGemini(BearSSL::WiFiClientSecure * client) {
+// Handle Gemini protocol (with option authentication marker)
+void clGemini(BearSSL::WiFiClientSecure * client, bool certified = false) {
   char *pSchema, *pHost, *pPort, *pPath, *pQuery, *pEOL;
   bool titan = false;
   // Prepare the log
@@ -1879,6 +1878,7 @@ void setup() {
   }
   else {
     srvGemini.setRSACert(srvCert, srvKey);
+    srvGeminiAuth.setRSACert(srvCert, srvKey);
     // Set the server's cache
 #if defined(USE_CACHE)
     srvGemini.setCache(&sslCache);
@@ -1936,8 +1936,9 @@ void loop() {
 
       // Start accepting connections
       if (haveRSAKeyCert) {
-        //srvGemini.setClientTrustAnchor(srvCert);
+        srvGeminiAuth.setClientTrustAnchor(srvCert);
         srvGemini.begin();
+        srvGeminiAuth.begin();
         Serial.print(F("GMI: Gemini server '"));
         Serial.print(cfgHOST);
         Serial.print(F(".local' started on "));
@@ -1975,17 +1976,22 @@ void loop() {
       MDNS.update();
 
     if (haveRSAKeyCert) {
-      srvGemini.setNoDelay(true);
-      BearSSL::WiFiClientSecure client = srvGemini.accept();
-      if (client) {
-
+      //srvGemini.setNoDelay(true);
+      BearSSL::WiFiClientSecure gemini = srvGemini.accept();
+      if (gemini) {
         // LED on
         //digitalWrite(LED, HIGH ^ LEDinv);
-
-        //client.setFingerprint("39b2204993bab61373aed82c24a20919b4bb7a9f");
-
         // Handle the client
-        clGemini(&client);
+        clGemini(&gemini);
+        // LED off
+        //digitalWrite(LED, LOW ^ LEDinv);
+      }
+      BearSSL::WiFiClientSecure gemini_auth = srvGeminiAuth.accept();
+      if (gemini_auth) {
+        // LED on
+        //digitalWrite(LED, HIGH ^ LEDinv);
+        // Handle the client
+        clGemini(&gemini_auth, true);
         // LED off
         //digitalWrite(LED, LOW ^ LEDinv);
       }
@@ -2025,8 +2031,10 @@ void loop() {
     Serial.println(F("WFI: WiFi disconnected"));
     if (cfgMDNS)
       MDNS.end();
-    if (haveRSAKeyCert)
+    if (haveRSAKeyCert) {
       srvGemini.stop();
+      srvGeminiAuth.stop();
+    }
     srvSpartan.stop();
     srvGopher.stop();
     srvHTTP.stop();
