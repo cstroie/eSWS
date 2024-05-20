@@ -24,14 +24,15 @@
 
 // Software name and version
 #define PROGNAME "kore"
-#define PROGVERS "0.4"
+#define PROGVERS "0.5"
 
 // Main configuration file
 #define CFG_FILE "/kore.cfg"
 
 // Certificate and key
-#define SSL_CERT "/ssl/crt.pem"
-#define SSL_KEY "/ssl/key.pem"
+#define SSL_CA    "/ssl/ca-cert.pem"
+#define SSL_CERT  "/ssl/srv-cert.pem"
+#define SSL_KEY   "/ssl/srv-key.pem"
 
 // LED configuration
 #define LEDinv (true)
@@ -88,6 +89,7 @@ int rspStatus[_PROTO_ALL][_ST_ALL] = {
 BearSSL::WiFiServerSecure srvGemini(1965);
 BearSSL::WiFiServerSecure srvGeminiAuth(1969);
 BearSSL::X509List *srvCert;
+BearSSL::X509List *srvCA;
 BearSSL::PrivateKey *srvKey;
 #define CACHE_SIZE 5  // Number of sessions to cache.
 #define USE_CACHE     // Enable SSL session caching.
@@ -245,6 +247,18 @@ void percentDecode(char *uri) {
 // Load the certificate and the key from storage
 bool loadCertKey() {
   File file;
+  Serial.print(F("SYS: Reading SSL CA from "));
+  Serial.print(SSL_CA);
+  Serial.print(F(" ... "));
+  file = SD.open(SSL_CA, FILE_READ);
+  if (file.isFile()) {
+    Serial.println(F("done."));
+    srvCA = new BearSSL::X509List(file, file.size());
+  }
+  else {
+    Serial.println(F("failed."));
+  }
+  file.close();
   Serial.print(F("SYS: Reading SSL certificate from "));
   Serial.print(SSL_CERT);
   Serial.print(F(" ... "));
@@ -1042,7 +1056,7 @@ int receiveFile(Stream *client, char *pHost, char *pPath, char *plData, int plSi
 }
 
 // Send file content or generated file
-int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQuery, const char *pFile) {
+int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQuery, const char *pFile, bool certified = false) {
   int outSize = 0;  // Total output size
   int dirEnd = 0;   // Index to directory name ending
   int vhostEnd = 0; // Index to vhost name ending
@@ -1252,11 +1266,11 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
     // Send the server status page
     outSize = sendStatusPage(client);
   }
-  else if (strcmp(pPath, "/input") == 0 and proto == GEMINI) {
+  else if (strcmp(pPath, "/input") == 0 and proto == GEMINI and certified) {
     // Send the server status page
     logErrCode = sendHeader(client, proto, ST_PASSWORD, "Password:");
   }
-  else if (strcmp(pPath, "/admin/create-directory") == 0 and proto == GEMINI) {
+  else if (strcmp(pPath, "/admin/create-directory") == 0 and proto == GEMINI and certified) {
     // Ask for directory name if not specified
     if (*pQuery == 0)
       logErrCode = sendHeader(client, proto, ST_INPUT, "Directory (absolute path):");
@@ -1276,7 +1290,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
     // Return 0
     return 0;
   }
-  else if (strcmp(pPath, "/cpio") == 0) {
+  else if (strcmp(pPath, "/cpio") == 0 and certified) {
     // Redirect to a date-based export URL
     char bufTime[100];
     struct tm* stTime;
@@ -1291,7 +1305,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
     // Return 0
     return 0;
   }
-  else if (strncmp(pExt, ".cpio", 5) == 0) {
+  else if (strncmp(pExt, ".cpio", 5) == 0 and certified) {
     // The requested virtual file is a CPIO archive. Trim the filepath
     // to the file name and get the parent directory (it can also be a
     // single file). Use it for archive root.
@@ -1301,7 +1315,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
     // Restore the filePath
     pName[0] = '/';
   }
-  else if (strncmp(pName, "/feed", 5) == 0) {
+  else if (strncmp(pName, "/feed.gmi", 5) == 0 and certified) {
     // The requested virtual file is a gemini feed
     pName[0] = '\0';
     // Send the feed
@@ -1309,7 +1323,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
     // Restore the filePath
     pName[0] = '/';
   }
-  else if (strcmp(pPath, "/tinylog/new") == 0 and proto == GEMINI) {
+  else if (strcmp(pPath, "/tinylog/new") == 0 and proto == GEMINI and certified) {
     // Add a new entry to the tinylog
     if (*pQuery == 0)
       logErrCode = sendHeader(client, proto, ST_INPUT, "Tinylog entry:");
@@ -1457,7 +1471,7 @@ void clGemini(BearSSL::WiFiClientSecure * client, bool certified = false) {
 #endif
 
     // If the protocol is 'titan', we need to read the upcoming data. We will use the same buffer, after pEOL
-    if (titan) {
+    if (titan and certified) {
       // Allow titan only for admin host
       /*
         if (*cfgAdminHost != 0 and
@@ -1530,7 +1544,7 @@ void clGemini(BearSSL::WiFiClientSecure * client, bool certified = false) {
     }
     else {
       // Send the requested file or the generated response
-      outSize = sendFile(client, GEMINI, pHost, pPath, pQuery, "index.gmi");
+      outSize = sendFile(client, GEMINI, pHost, pPath, pQuery, "index.gmi", certified);
       // We can now safely break the loop
       break;
     }
@@ -1936,7 +1950,7 @@ void loop() {
 
       // Start accepting connections
       if (haveRSAKeyCert) {
-        srvGeminiAuth.setClientTrustAnchor(srvCert);
+        srvGeminiAuth.setClientTrustAnchor(srvCA);
         srvGemini.begin();
         srvGeminiAuth.begin();
         Serial.print(F("GMI: Gemini server '"));
