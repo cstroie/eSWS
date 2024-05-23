@@ -1024,10 +1024,11 @@ int receiveFile(Stream *client, char *pHost, char *pPath, char *plData, int plSi
   // If directory, return error
   file = SD.open(filePath, FILE_READ);
   if (file.isDirectory()) {
-    file.close();
-    logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Path is a directory");
-    delete (filePath);
-    return 0;
+    // Append a slash if needed
+    if (pPath[strlen(pPath) - 1] != '/')
+      strcat(filePath, "/");
+    // Append the default file name for gemini
+    strcat(filePath, "index.gmi");
   };
   file.close();
   // Total bytes received
