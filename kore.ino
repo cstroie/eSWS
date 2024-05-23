@@ -20,6 +20,8 @@
 // The DEBUG flag
 //#define DEBUG
 
+#define USE_LFS
+
 //#define USE_UPNP
 
 // Software name and version
@@ -52,10 +54,16 @@
 #include <time.h>
 #include <TZ.h>
 #include <sntp.h>
-#include <SPI.h>
 
-#include <SD.h>
-
+#ifdef USE_LFS
+#  include <LittleFS.h>
+#  define FILESYS LittleFS
+#  define FILE_READ "r"
+#else
+#  include <SPI.h>
+#  include <SD.h>
+#  define FILESYS SD
+#endif
 
 using namespace BearSSL;
 
@@ -69,9 +77,11 @@ TinyUPnP *tinyUPnP = new TinyUPnP(5000);
 // WiFi multiple access points
 ESP8266WiFiMulti wifiMulti;
 
+#ifndef USE_LFS
 // SD card CS pins to test
 int spiCS = -1;
 int spiCSPins[] = {D8, D4};
+#endif
 
 // Protocols
 enum proto_t {GEMINI, SPARTAN, HTTP, GOPHER, _PROTO_ALL};
@@ -251,7 +261,7 @@ bool loadCertKey() {
   Serial.print(F("SYS: Reading SSL CA from "));
   Serial.print(SSL_CA);
   Serial.print(F(" ... "));
-  file = SD.open(SSL_CA, FILE_READ);
+  file = FILESYS.open(SSL_CA, FILE_READ);
   if (file.isFile()) {
     Serial.println(F("done."));
     srvCA = new BearSSL::X509List(file, file.size());
@@ -264,7 +274,7 @@ bool loadCertKey() {
   Serial.print(F("SYS: Reading SSL certificate from "));
   Serial.print(SSL_CERT);
   Serial.print(F(" ... "));
-  file = SD.open(SSL_CERT, FILE_READ);
+  file = FILESYS.open(SSL_CERT, FILE_READ);
   if (file.isFile()) {
     Serial.println(F("done."));
     srvCert = new BearSSL::X509List(file, file.size());
@@ -277,7 +287,7 @@ bool loadCertKey() {
   Serial.print(F("SYS: Reading SSL key from "));
   Serial.print(SSL_KEY);
   Serial.print(F(" ... "));
-  file = SD.open(SSL_KEY, FILE_READ);
+  file = FILESYS.open(SSL_KEY, FILE_READ);
   if (file.isFile()) {
     Serial.println(F("done."));
     srvKey = new BearSSL::PrivateKey(file, file.size());
@@ -428,7 +438,7 @@ bool loadConfig() {
   Serial.print(F("SYS: Reading main configuration from "));
   Serial.print(CFG_FILE);
   Serial.print(F(" ... "));
-  File file = SD.open(CFG_FILE, FILE_READ);
+  File file = FILESYS.open(CFG_FILE, FILE_READ);
   if (file.isFile()) {
     Serial.println();
     while (len >= 0) {
@@ -538,8 +548,8 @@ unsigned long uptime(char *buf, size_t len) {
 
 // Copy a file from src to dst
 void copyFile(const char *src, const char *dst) {
-  File srcFile = SD.open(src, FILE_READ);
-  File dstFile = SD.open(dst, "w");
+  File srcFile = FILESYS.open(src, FILE_READ);
+  File dstFile = FILESYS.open(dst, "w");
   uint8_t buf[512];
   while (srcFile.available()) {
     int len = srcFile.read(buf, 512);
@@ -552,12 +562,12 @@ void copyFile(const char *src, const char *dst) {
 // Move a file from src to dst
 void moveFile(const char *src, const char *dst) {
   copyFile(src, dst);
-  SD.remove(src);
+  FILESYS.remove(src);
 }
 
 // Archive a file
 void archFile(const char *file) {
-  if (SD.exists(file)) {
+  if (FILESYS.exists(file)) {
     char buf[20];
     struct tm* stTime;
     time_t now = time(NULL);
@@ -571,7 +581,7 @@ void archFile(const char *file) {
     // Append existing file path
     strcat(arch, file);
     // Create a direcory with same name
-    SD.mkdir(arch);
+    FILESYS.mkdir(arch);
     // Append the date-time file name
     strcat(arch, buf);
     // Copy the existing file
@@ -596,9 +606,9 @@ int addTinyLog(char *filePath, char *entry) {
   stTime = localtime(&now);
   strftime(bufTime, 30, "## %F %R %Z\r\n", stTime);
   // Open the temporary file
-  File dst = SD.open("/~tinylog.tmp", "w");
+  File dst = FILESYS.open("/~tinylog.tmp", "w");
   // Open the log file and read it line by line until the first second level header
-  File src = SD.open(filePath, FILE_READ);
+  File src = FILESYS.open(filePath, FILE_READ);
   if (dst.isFile() and src.isFile()) {
     // Initial state
     state = BEFORE;
@@ -732,14 +742,14 @@ int sendDirCPIO(Stream *client, File dir) {
 int sendArchCPIO(Stream * client, proto_t proto, char *path) {
   int outSize = 0;
   // Check the path exists
-  if (!SD.exists(path)) {
+  if (!FILESYS.exists(path)) {
     logErrCode = sendHeader(client, proto, ST_NOTFOUND, "File not found");
     return 0;
   }
   // Start with the header
   logErrCode = sendHeader(client, proto, ST_OK, "application/x-cpio");
   // Open the directory
-  File dir = SD.open(path);
+  File dir = FILESYS.open(path, "r");
   // Send its content
   outSize += sendDirCPIO(client, dir);
   dir.close();
@@ -805,7 +815,7 @@ int readPageTitle(File *file, char *line, const int maxLen = 100, const int maxL
 // Try to read the title of a gemini page (by path)
 int readPageTitle(char *path, char *line, const int maxLen = 100, const int maxLines = 5) {
   // Open the file
-  File file = SD.open(path);
+  File file = FILESYS.open(path, "r");
   int len = readPageTitle(&file, line, maxLen, maxLines);
   // Close the file
   file.close();
@@ -839,7 +849,7 @@ int sendFeed(Stream * client, proto_t proto, char *path, char *pathFS) {
   char *tmpPath;
   File tmpFile;
   // Check the directory exists
-  if (!SD.exists(pathFS)) {
+  if (!FILESYS.exists(pathFS)) {
     logErrCode = sendHeader(client, proto, ST_NOTFOUND, "File not found");
     return 0;
   }
@@ -856,7 +866,7 @@ int sendFeed(Stream * client, proto_t proto, char *path, char *pathFS) {
   // Check if there is a feed header file
   strcpy(tmpPath, pathFS);
   strcat(tmpPath, "/feed-hdr.gmi");
-  tmpFile = SD.open(tmpPath, FILE_READ);
+  tmpFile = FILESYS.open(tmpPath, FILE_READ);
   outSize += sendFileContent(client, &tmpFile);
   tmpFile.close();
 
@@ -881,7 +891,7 @@ int sendFeed(Stream * client, proto_t proto, char *path, char *pathFS) {
   }
 
   // List files in the specified filesystem path
-  File root = SD.open(pathFS);
+  File root = FILESYS.open(pathFS, "r");
   while (tmpFile = root.openNextFile()) {
     // Ignore some items
     if (tmpFile.isDirectory() or                        // directories
@@ -934,7 +944,7 @@ int sendFeed(Stream * client, proto_t proto, char *path, char *pathFS) {
   // Check if there is a feed footer file
   strcpy(tmpPath, pathFS);
   strcat(tmpPath, "/feed-ftr.gmi");
-  tmpFile = SD.open(tmpPath, FILE_READ);
+  tmpFile = FILESYS.open(tmpPath, FILE_READ);
   outSize += sendFileContent(client, &tmpFile);
   tmpFile.close();
 
@@ -1009,7 +1019,7 @@ int receiveFile(Stream *client, char *pHost, char *pPath, char *plData, int plSi
     strcat(filePath, pHost);
   }
   // Check the virtual host directory exists
-  file = SD.open(filePath, FILE_READ);
+  file = FILESYS.open(filePath, FILE_READ);
   if (!file.isDirectory()) {
     // If not, fallback to FQDN
     file.close();
@@ -1022,7 +1032,7 @@ int receiveFile(Stream *client, char *pHost, char *pPath, char *plData, int plSi
   // Append the path
   strcat(filePath, pPath);
   // If directory, return error
-  file = SD.open(filePath, FILE_READ);
+  file = FILESYS.open(filePath, FILE_READ);
   if (file.isDirectory()) {
     // Append a slash if needed
     if (pPath[strlen(pPath) - 1] != '/')
@@ -1034,7 +1044,7 @@ int receiveFile(Stream *client, char *pHost, char *pPath, char *plData, int plSi
   // Total bytes received
   int total = 0;
   // Open the temporary file for writing
-  File wrFile = SD.open("/~titan~.tmp", "w");
+  File wrFile = FILESYS.open("/~titan~.tmp", "w");
   // If the file is available, write to it
   if (wrFile) {
     int toRead = plSize;
@@ -1111,7 +1121,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
     strcat(filePath, pHost);
   }
   // Check the virtual host directory exists
-  file = SD.open(filePath, FILE_READ);
+  file = FILESYS.open(filePath, FILE_READ);
   if (!file.isDirectory()) {
     // If not, fallback to FQDN
     file.close();
@@ -1126,7 +1136,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
   // Append the path
   strcat(filePath, pPath);
   // Check if it's directory requested and append default file name for protocol
-  file = SD.open(filePath, FILE_READ);
+  file = FILESYS.open(filePath, FILE_READ);
   if (file.isDirectory()) {
     file.close();
     // Redirect to slash-ending path if directory
@@ -1143,7 +1153,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
     dirEnd = strlen(filePath);
     // Append the default file name
     strcat(filePath, pFile);
-    file = SD.open(filePath, FILE_READ);
+    file = FILESYS.open(filePath, FILE_READ);
   };
   // Find the requested file name in filesystem path
   pName = strrchr(filePath, '/');
@@ -1210,8 +1220,8 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
         outSize += client->print("\r\n\r\n");
         break;
     }
-    // List files in SD
-    File root = SD.open(filePath);
+    // List files in filesystem
+    File root = FILESYS.open(filePath, "r");
     while (File entry = root.openNextFile()) {
       // Ignore hidden files
       if (entry.name()[0] == '.') continue;
@@ -1296,7 +1306,7 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
         strcat(filePath, "/");
       // Append the specified directory name
       strcat(filePath, pQuery);
-      SD.mkdir(filePath);
+      FILESYS.mkdir(filePath);
       logErrCode = sendHeader(client, proto, ST_REDIR, &filePath[vhostEnd]);
     }
     // Destroy the file path string
@@ -1857,6 +1867,19 @@ void setup() {
   //pinMode(LED, OUTPUT);
   //digitalWrite(LED, LOW ^ LEDinv);
 
+#ifdef USE_LFS
+  LittleFSConfig cfg;
+  cfg.setAutoFormat(false);
+  // Initialize file system.
+  if (!LittleFS.begin())
+    Serial.println("SYS: Failed to mount file system");
+
+  // list files in LittleFS
+  Dir dir = LittleFS.openDir("/");
+  while (dir.next()) {
+    Serial.println(dir.fileName());
+  }
+#else
   // SPI
   SPI.begin();
   // Init SD card
@@ -1884,13 +1907,14 @@ void setup() {
       default:  Serial.println(F("Unknown"));
     }
     Serial.printf(" FAT %d %dMb\r\n", SD.fatType(), SD.size64() / 1048576);
-    // Set time callback
-    SD.setTimeCallback(cbTime);
   }
   else {
     Serial.println(F("No SD card found. Reset."));
     reboot();
   }
+#endif
+  // Set time callback
+  FILESYS.setTimeCallback(cbTime);
 
   // Load main configuration
   if (!loadConfig()) {
