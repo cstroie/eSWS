@@ -27,7 +27,7 @@
 #define PROGVERS "0.5"
 
 // Main configuration file
-#define CFG_FILE "/kore.cfg"
+#define CFG_FILE  "/kore.cfg"
 
 // Certificate and key
 #define SSL_CA    "/ssl/ca-cert.pem"
@@ -106,7 +106,8 @@ BearSSL::ServerSessions sslCache(CACHE_SIZE);
 ServerSession sslStore[CACHE_SIZE];
 BearSSL::ServerSessions sslCache(sslStore, CACHE_SIZE);
 #endif
-bool haveRSAKeyCert = true;
+bool haveKeyCert = true;
+bool haveCA = false;
 
 // HTTP
 WiFiServer srvHTTP(80);
@@ -116,7 +117,7 @@ WiFiServer srvSpartan(300);
 WiFiServer srvGopher(70);
 
 // Main buffer
-char buf[1025];
+char buf[1028];
 
 // Main configuration
 char *cfgHOST, *cfgFQDN, *cfgAdminHost, *cfgTitanToken;
@@ -254,6 +255,7 @@ bool loadCertKey() {
   if (file.isFile()) {
     Serial.println(F("done."));
     srvCA = new BearSSL::X509List(file, file.size());
+    haveCA = true;
   }
   else {
     Serial.println(F("failed."));
@@ -268,7 +270,7 @@ bool loadCertKey() {
     srvCert = new BearSSL::X509List(file, file.size());
   }
   else {
-    haveRSAKeyCert = false;
+    haveKeyCert = false;
     Serial.println(F("failed."));
   }
   file.close();
@@ -281,11 +283,11 @@ bool loadCertKey() {
     srvKey = new BearSSL::PrivateKey(file, file.size());
   }
   else {
-    haveRSAKeyCert = false;
+    haveKeyCert = false;
     Serial.println(F("failed."));
   }
   file.close();
-  return haveRSAKeyCert;
+  return haveKeyCert;
 }
 
 // Set the host name and FQDN
@@ -672,30 +674,38 @@ int sendHeader(Stream *client, proto_t proto, status_t status, const char *pText
 int sendFileCPIO(Stream *client, File file) {
   int outSize = 0;
   int pad = 0;
+  // Reset the buffer
+  memset(buf, 0, sizeof(buf));
+  // Copy the file name
+  char *fileNameFull = strdup(file.fullName());
+  char *fileName = fileNameFull;
+  if (fileNameFull[0] == '/') fileName += 1;
   // ino type+mode uid gid nlink mtime size devM devm rdevM rdevm filename_len filename 0
   int hdrSize = sprintf(buf, "070701%08X%08X%08X%08X%08X%08X%08X%08X%08X%08X%08X%08X00000000%s%c",
-                        0, 0100644, 0, 0, 1, (uint32_t)file.getLastWrite(), (uint32_t)file.size(), 0, 0, 0, 0, strlen(file.fullName()) + 1, file.fullName(), '\0');
+                        0, 0100644, 0, 0, 1, (uint32_t)file.getLastWrite(), (uint32_t)file.size(),
+                        0, 0, 0, 0, strlen(fileName) + 1, fileName, '\0');
+  delete(fileName);
   outSize += hdrSize;
-  // Padding
+  // Padding after header
   pad = (- outSize) & 3;
   outSize += pad;
   // Write the header and the pad
-  client->write(buf, hdrSize);
-  client->write("\0\0\0\0", pad);
+  client->write(buf, hdrSize + pad);
   // Send the file content, if any
   if (file.size()) {
     outSize += file.size();
     // Send content
-    uint8_t fileBuf[512];
     while (file.available()) {
-      int len = file.read(fileBuf, 512);
-      client->write(fileBuf, len);
+      int len = file.read((uint8_t*)buf, 1024);
+      if (!file.available()) {
+        memset(&buf[len], 0, 4);
+        // Padding after file content
+        pad = (- outSize) & 3;
+        outSize += pad;
+        len += pad;
+      }
+      client->write((uint8_t*)buf, len);
     }
-    // Padding
-    pad = (- outSize) & 3;
-    outSize += pad;
-    // Write the pad after file content
-    client->write("\0\0\0\0", pad);
   }
   // Return the output size
   return outSize;
@@ -733,17 +743,20 @@ int sendArchCPIO(Stream * client, proto_t proto, char *path) {
   // Send its content
   outSize += sendDirCPIO(client, dir);
   dir.close();
+  // Reset the buffer
+  memset(buf, 0, sizeof(buf));
   // Write the TRAILER
-  client->write("070701", 6);
-  for (int i = 88; i > 0; i--)
-    client->write('0');
-  client->write("0000000B00000000TRAILER!!!\0", 27);
+  strncpy(buf, "070701", 6);
+  for (int i = 6; i < 104 + 6; i++)
+    buf[i] = '0';
+  buf[101] = 'B';
+  strncat(buf, "TRAILER!!!\0\0\0\0\0", 15);
   outSize += 121;
-  // Padding
+  // Padding after trailer
   int pad = (- outSize) & 3;
   outSize += pad;
-  // Write the pad after file content
-  client->write("\0\0\0\0", pad);
+  // Write the trailer and the pad after trailer
+  client->write(buf, 121 + pad);
   // Return the archive size
   return outSize;
 }
@@ -1917,7 +1930,7 @@ void loop() {
           Serial.println(F("DNS: Error setting up MDNS"));
         }
         else {
-          if (haveRSAKeyCert)
+          if (haveKeyCert)
             MDNS.addService("gemini", "tcp", 1965);
           MDNS.addService("spartan", "tcp", 300);
           MDNS.addService("http", "tcp", 80);
@@ -1949,10 +1962,12 @@ void loop() {
       setClock();
 
       // Start accepting connections
-      if (haveRSAKeyCert) {
-        srvGeminiAuth.setClientTrustAnchor(srvCA);
+      if (haveKeyCert) {
+        if (haveCA) {
+          srvGeminiAuth.setClientTrustAnchor(srvCA);
+          srvGeminiAuth.begin();
+        }
         srvGemini.begin();
-        srvGeminiAuth.begin();
         Serial.print(F("GMI: Gemini server '"));
         Serial.print(cfgHOST);
         Serial.print(F(".local' started on "));
@@ -1989,7 +2004,7 @@ void loop() {
     if (cfgMDNS)
       MDNS.update();
 
-    if (haveRSAKeyCert) {
+    if (haveKeyCert) {
       //srvGemini.setNoDelay(true);
       BearSSL::WiFiClientSecure gemini = srvGemini.accept();
       if (gemini) {
@@ -2000,14 +2015,16 @@ void loop() {
         // LED off
         //digitalWrite(LED, LOW ^ LEDinv);
       }
-      BearSSL::WiFiClientSecure gemini_auth = srvGeminiAuth.accept();
-      if (gemini_auth) {
-        // LED on
-        //digitalWrite(LED, HIGH ^ LEDinv);
-        // Handle the client
-        clGemini(&gemini_auth, true);
-        // LED off
-        //digitalWrite(LED, LOW ^ LEDinv);
+      if (haveCA) {
+        BearSSL::WiFiClientSecure gemini_auth = srvGeminiAuth.accept();
+        if (gemini_auth) {
+          // LED on
+          //digitalWrite(LED, HIGH ^ LEDinv);
+          // Handle the client
+          clGemini(&gemini_auth, true);
+          // LED off
+          //digitalWrite(LED, LOW ^ LEDinv);
+        }
       }
     }
 
@@ -2045,9 +2062,10 @@ void loop() {
     Serial.println(F("WFI: WiFi disconnected"));
     if (cfgMDNS)
       MDNS.end();
-    if (haveRSAKeyCert) {
+    if (haveKeyCert) {
       srvGemini.stop();
-      srvGeminiAuth.stop();
+      if (haveCA)
+        srvGeminiAuth.stop();
     }
     srvSpartan.stop();
     srvGopher.stop();
