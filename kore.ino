@@ -20,13 +20,13 @@
 // The DEBUG flag
 //#define DEBUG
 
-#define USE_LFS
+//#define USE_LFS
 
 //#define USE_UPNP
 
 // Software name and version
 #define PROGNAME "kore"
-#define PROGVERS "0.6"
+#define PROGVERS "0.7"
 
 // Main configuration file
 #define CFG_FILE  "/kore.cfg"
@@ -52,7 +52,6 @@
 #include <ESP8266HTTPClient.h>
 #include <ESP8266mDNS.h>
 #include <time.h>
-#include <TZ.h>
 #include <sntp.h>
 
 #ifdef USE_LFS
@@ -64,9 +63,6 @@
 #  include <SD.h>
 #  define FSYS SD
 #endif
-
-using namespace BearSSL;
-
 
 // UPnP
 #ifdef USE_UPNP
@@ -86,22 +82,21 @@ int spiCSPins[] = {D8, D4};
 // Protocols
 enum proto_t {GEMINI, SPARTAN, HTTP, GOPHER, _PROTO_ALL};
 // Pseudo-statuses
-enum status_t {ST_OK, ST_INPUT, ST_PASSWORD, ST_REDIR, ST_MOVED, ST_NOTFOUND, ST_INVALID, ST_SERVERERROR, _ST_ALL};
+enum status_t {ST_OK, ST_INPUT, ST_PASSWORD, ST_REDIR, ST_MOVED, ST_NOTFOUND, ST_INVALID, ST_SERVERERROR, ST_AUTH, _ST_ALL};
 int rspStatus[_PROTO_ALL][_ST_ALL] = {
-  {20, 10, 11, 30, 31, 51, 59, 59},
-  {2, 2, 2, 3, 3, 4, 4, 5},
-  {200, 200, 200, 301, 301, 404, 500, 500},
-  {0, 0, 0, 0, 0, 0, 0, 0}
+  {20, 10, 11, 30, 31, 51, 59, 59, 61},
+  {2, 2, 2, 3, 3, 4, 4, 5, 5},
+  {200, 200, 200, 301, 301, 404, 500, 500, 403},
+  {0, 0, 0, 0, 0, 0, 0, 0, 0}
 };
 
 // TLS server
-// openssl req -new -x509 -keyout key.pem -out crt.pem -days 3650 -nodes -subj "/C=RO/ST=Bucharest/L=Bucharest/O=Eridu/OU=IT/CN=koremoon.duckdns.org" -addext "subjectAltName=DNS:eridu.eu.org,DNS:kore.eridu.eu.org,DNS:koremoon.duckdns.org,DNS:*.koremoon.duckdns.org,DNS:koremoon.localDNS:kore.local,DNS:localhost"
 BearSSL::WiFiServerSecure srvGemini(1965);
 BearSSL::WiFiServerSecure srvGeminiAuth(1969);
 BearSSL::X509List *srvCert;
 BearSSL::X509List *srvCA;
 BearSSL::PrivateKey *srvKey;
-#define CACHE_SIZE 5  // Number of sessions to cache.
+#define CACHE_SIZE 3  // Number of sessions to cache.
 #define USE_CACHE     // Enable SSL session caching.
 // Caching SSL sessions shortens the length of the SSL handshake.
 // You can see the performance improvement by looking at the
@@ -130,7 +125,7 @@ WiFiServer srvGopher(70);
 char buf[1028];
 
 // Main configuration
-char *cfgHOST, *cfgFQDN, *cfgAdminHost, *cfgTitanToken;
+char *cfgHOST, *cfgFQDN, *cfgTitanToken;
 char *cfgDuckDNS;
 char *cfgTimeZone;
 bool cfgMDNS = true;
@@ -316,13 +311,6 @@ void setHostName(char *str) {
   WiFi.hostname(cfgHOST);
 }
 
-// Set the admin host name
-void setAdminHost(char *str) {
-  Serial.print(F("SYS: Admin hostname: "));
-  cfgAdminHost = strdup(str);
-  Serial.println(cfgAdminHost);
-}
-
 // Set the DuckDNS token
 void setDuckDNS(char *str) {
   Serial.print(F("SYS: DuckDNS token: "));
@@ -457,7 +445,6 @@ bool loadConfig() {
           pVal++;
           if (trim(pVal) > 0) {
             if      (!strcmp(pKey, "hostname")) setHostName(pVal);
-            else if (!strcmp(pKey, "admin"))    setAdminHost(pVal);
             else if (!strcmp(pKey, "titan"))    setTitanToken(pVal);
             else if (!strcmp(pKey, "ddns"))     setDuckDNS(pVal);
             else if (!strcmp(pKey, "tz"))       setTimeZone(pVal);
@@ -1080,7 +1067,7 @@ int receiveFile(Stream *client, char *pHost, char *pPath, char *plData, int plSi
 }
 
 // Send file content or generated file
-int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQuery, const char *pFile, bool certified = false) {
+int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQuery, const char *pFile, bool auth = false) {
   int outSize = 0;  // Total output size
   int dirEnd = 0;   // Index to directory name ending
   int vhostEnd = 0; // Index to vhost name ending
@@ -1094,8 +1081,6 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
     logErrCode = sendHeader(client, proto, ST_INVALID, "Invalid path");
     return 0;
   }
-  // Check if this is the admin host
-  bool isAdminHost = (*cfgAdminHost != 0 and strncmp(pHost, cfgAdminHost, strlen(cfgAdminHost)) == 0);
   // Virtual hosting, find the server root directory
   int hostLen = strlen(cfgFQDN);
   // Find the longest host name
@@ -1113,9 +1098,6 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
   else if (strncmp(cfgHOST, pHost, strlen(cfgHOST)) == 0 and strncmp(&pHost[strlen(cfgHOST)], ".local", 6) == 0)
     // Special case for .local
     strcat(filePath, cfgHOST);
-  else if (isAdminHost)
-    // Admin host
-    strcat(filePath, cfgFQDN);
   else {
     // Use the requested host name
     strcat(filePath, pHost);
@@ -1195,10 +1177,6 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
     // Send content
     sendFileContent(client, &file);
     file.close();
-    // Add admin footer for file if gemini
-    //if (isAdminHost and strcmp(pExt, "gmi") == 0) {
-    //  client->print("---\r\n=> titan://. Edit page\r\n");
-    //}
   }
   else if (dirEnd > 0) {
     // The request was for a directory and there is no directory index.
@@ -1281,90 +1259,110 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
           break;
       }
     }
-    // Add admin footer for directory
-    //if (isAdminHost) {
-    //  client->print("---\r\n=> /admin/create-directory Create directory\r\n");
-    //}
   }
   else if (strcmp(pPath, "/status") == 0 and proto == GEMINI) {
     // Send the server status page
     outSize = sendStatusPage(client);
   }
-  else if (strcmp(pPath, "/input") == 0 and proto == GEMINI and certified) {
-    // Send the server status page
-    logErrCode = sendHeader(client, proto, ST_PASSWORD, "Password:");
-  }
-  else if (strcmp(pPath, "/admin/create-directory") == 0 and proto == GEMINI and certified) {
-    // Ask for directory name if not specified
-    if (*pQuery == 0)
-      logErrCode = sendHeader(client, proto, ST_INPUT, "Directory (absolute path):");
-    else {
-      // Trim to vhost
-      filePath[vhostEnd] = '\0';
-      // Append a slash, if needed
-      if (pQuery[0] != '/')
-        strcat(filePath, "/");
-      // Append the specified directory name
-      strcat(filePath, pQuery);
-      FSYS.mkdir(filePath);
-      logErrCode = sendHeader(client, proto, ST_REDIR, &filePath[vhostEnd]);
+  else if (strcmp(pPath, "/input") == 0 and proto == GEMINI) {
+    if (auth) {
+      // Send the server status page
+      logErrCode = sendHeader(client, proto, ST_PASSWORD, "Password:");
     }
-    // Destroy the file path string
-    delete (filePath);
-    // Return 0
-    return 0;
-  }
-  else if (strcmp(pPath, "/cpio") == 0 and certified) {
-    // Redirect to a date-based export URL
-    char bufTime[100];
-    struct tm* stTime;
-    time_t now = time(NULL);
-    stTime = localtime(&now);
-    sprintf(bufTime, "/%s-%04d%02d%02d-%02d%02d%02d.cpio",
-            cfgHOST, stTime->tm_year + 1900, stTime->tm_mon + 1, stTime->tm_mday,
-            stTime->tm_hour, stTime->tm_min, stTime->tm_sec);
-    logErrCode = sendHeader(client, proto, ST_REDIR, bufTime);
-    // Destroy the file path string
-    delete (filePath);
-    // Return 0
-    return 0;
-  }
-  else if (strncmp(pExt, ".cpio", 5) == 0 and certified) {
-    // The requested virtual file is a CPIO archive. Trim the filepath
-    // to the file name and get the parent directory (it can also be a
-    // single file). Use it for archive root.
-    pName[0] = '\0';
-    // Send the archive
-    outSize = sendArchCPIO(client, proto, filePath);
-    // Restore the filePath
-    pName[0] = '/';
-  }
-  else if (strncmp(pName, "/feed.gmi", 5) == 0 and certified) {
-    // The requested virtual file is a gemini feed
-    pName[0] = '\0';
-    // Send the feed
-    outSize = sendFeed(client, proto, pPath, filePath);
-    // Restore the filePath
-    pName[0] = '/';
-  }
-  else if (strcmp(pPath, "/tinylog/new") == 0 and proto == GEMINI and certified) {
-    // Add a new entry to the tinylog
-    if (*pQuery == 0)
-      logErrCode = sendHeader(client, proto, ST_INPUT, "Tinylog entry:");
     else {
-      // Trim file path to vhost
-      filePath[vhostEnd] = '\0';
-      // Append the tinylog filename
-      strcat(filePath, "/tinylog.gmi");
-      // Add a new entry
-      outSize = addTinyLog(filePath, pQuery);
-      // Redirect to tinylog file
-      logErrCode = sendHeader(client, proto, ST_REDIR, "/tinylog.gmi");
+      // Send the certificate requested response
+      logErrCode = sendHeader(client, proto, ST_AUTH, "Client identification is required.");
     }
-    // Destroy the file path string
-    delete (filePath);
-    // Return 0
-    return 0;
+  }
+  else if (strcmp(pPath, "/admin/create-directory") == 0 and proto == GEMINI) {
+    if (auth) {
+      // Ask for directory name if not specified
+      if (*pQuery == 0)
+        logErrCode = sendHeader(client, proto, ST_INPUT, "Directory (absolute path):");
+      else {
+        // Trim to vhost
+        filePath[vhostEnd] = '\0';
+        // Append a slash, if needed
+        if (pQuery[0] != '/')
+          strcat(filePath, "/");
+        // Append the specified directory name
+        strcat(filePath, pQuery);
+        FSYS.mkdir(filePath);
+        logErrCode = sendHeader(client, proto, ST_REDIR, &filePath[vhostEnd]);
+      }
+    }
+    else {
+      // Send the certificate requested response
+      logErrCode = sendHeader(client, proto, ST_AUTH, "Client identification is required.");
+    }
+  }
+  else if (strcmp(pPath, "/cpio") == 0) {
+    if (auth) {
+      // Redirect to a date-based export URL
+      char bufTime[100];
+      struct tm* stTime;
+      time_t now = time(NULL);
+      stTime = localtime(&now);
+      sprintf(bufTime, "/%s-%04d%02d%02d-%02d%02d%02d.cpio",
+              cfgHOST, stTime->tm_year + 1900, stTime->tm_mon + 1, stTime->tm_mday,
+              stTime->tm_hour, stTime->tm_min, stTime->tm_sec);
+      logErrCode = sendHeader(client, proto, ST_REDIR, bufTime);
+    }
+    else {
+      // Send the certificate requested response
+      logErrCode = sendHeader(client, proto, ST_AUTH, "Client identification is required.");
+    }
+  }
+  else if (strncmp(pExt, ".cpio", 5) == 0) {
+    if (auth) {
+      // The requested virtual file is a CPIO archive.
+      // Trim the filepath to the file name and get the parent directory
+      // (it can also be a single file). Use it for archive root.
+      pName[0] = '\0';
+      // Send the archive
+      outSize = sendArchCPIO(client, proto, filePath);
+      // Restore the filePath
+      pName[0] = '/';
+    }
+    else {
+      // Send the certificate requested response
+      logErrCode = sendHeader(client, proto, ST_AUTH, "Client identification is required.");
+    }
+  }
+  else if (strncmp(pName, "/feed.gmi", 5) == 0) {
+    if (auth) {
+      // The requested virtual file is a gemini feed
+      pName[0] = '\0';
+      // Send the feed
+      outSize = sendFeed(client, proto, pPath, filePath);
+      // Restore the filePath
+      pName[0] = '/';
+    }
+    else {
+      // Send the certificate requested response
+      logErrCode = sendHeader(client, proto, ST_AUTH, "Client identification is required.");
+    }
+  }
+  else if (strcmp(pPath, "/tinylog/new") == 0 and proto == GEMINI) {
+    if (auth) {
+      // Add a new entry to the tinylog
+      if (*pQuery == 0)
+        logErrCode = sendHeader(client, proto, ST_INPUT, "Tinylog entry:");
+      else {
+        // Trim file path to vhost
+        filePath[vhostEnd] = '\0';
+        // Append the tinylog filename
+        strcat(filePath, "/tinylog.gmi");
+        // Add a new entry
+        outSize = addTinyLog(filePath, pQuery);
+        // Redirect to tinylog file
+        logErrCode = sendHeader(client, proto, ST_REDIR, "/tinylog.gmi");
+      }
+    }
+    else {
+      // Send the certificate requested response
+      logErrCode = sendHeader(client, proto, ST_AUTH, "Client identification is required.");
+    }
   }
   else
     // File not found
@@ -1377,11 +1375,14 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
 }
 
 // Print the first part of the log line
-void logPrint(IPAddress ip) {
+void logPrint(IPAddress ip, bool auth = false) {
   strftime(bufTime, 30, LOG_TIMEFMT, &logTime);
   Serial.print(F("LOG: "));
   Serial.print(ip);
-  Serial.print(" - - ");
+  if (auth)
+    Serial.print(" - a ");
+  else
+    Serial.print(" - - ");
   Serial.print(bufTime);
   Serial.print(" \"");
   Serial.print(buf);
@@ -1396,7 +1397,7 @@ void logPrint(int code, int size) {
 }
 
 // Handle Gemini protocol (with option authentication marker)
-void clGemini(BearSSL::WiFiClientSecure * client, bool certified = false) {
+void clGemini(BearSSL::WiFiClientSecure * client, bool auth = false) {
   char *pSchema, *pHost, *pPort, *pPath, *pQuery, *pEOL;
   bool titan = false;
   // Prepare the log
@@ -1422,7 +1423,7 @@ void clGemini(BearSSL::WiFiClientSecure * client, bool certified = false) {
     }
 
     // Print the first part of the log line
-    logPrint(client->remoteIP());
+    logPrint(client->remoteIP(), auth);
 
     // Check if the buffer was overflown
     if (len < 0) {
@@ -1494,16 +1495,9 @@ void clGemini(BearSSL::WiFiClientSecure * client, bool certified = false) {
     Serial.print(F("Query : ")); Serial.println(pQuery);
 #endif
 
-    // If the protocol is 'titan', we need to read the upcoming data. We will use the same buffer, after pEOL
-    if (titan and certified) {
-      // Allow titan only for admin host
-      /*
-        if (*cfgAdminHost != 0 and
-          strncmp(pHost, cfgAdminHost, strlen(cfgAdminHost)) != 0) {
-        logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Titan not allowed for this host");
-        break;
-        }
-      */
+    // If the protocol is 'titan', we need to read the upcoming data.
+    // We will use the same buffer, after pEOL.
+    if (titan and auth) {
       // Quick check the query
       if (*pQuery == 0) {
         logErrCode = sendHeader(client, GEMINI, ST_INVALID, "Invalid parameters for titan");
@@ -1568,7 +1562,7 @@ void clGemini(BearSSL::WiFiClientSecure * client, bool certified = false) {
     }
     else {
       // Send the requested file or the generated response
-      outSize = sendFile(client, GEMINI, pHost, pPath, pQuery, "index.gmi", certified);
+      outSize = sendFile(client, GEMINI, pHost, pPath, pQuery, "index.gmi", auth);
       // We can now safely break the loop
       break;
     }
@@ -1934,6 +1928,7 @@ void setup() {
     // Set the server's cache
 #if defined(USE_CACHE)
     srvGemini.setCache(&sslCache);
+    srvGeminiAuth.setCache(&sslCache);
 #endif
   }
 }
@@ -2045,7 +2040,7 @@ void loop() {
         if (gemini_auth) {
           // LED on
           //digitalWrite(LED, HIGH ^ LEDinv);
-          // Handle the client
+          // Handle the client (authenticated)
           clGemini(&gemini_auth, true);
           // LED off
           //digitalWrite(LED, LOW ^ LEDinv);
