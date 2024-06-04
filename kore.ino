@@ -466,7 +466,77 @@ bool loadConfig() {
   return result;
 }
 
+size_t getFortune(Stream *client, const char *cookies) {
+  char filePath[80];
+  size_t len = 1024;
+  size_t outSize = 0;
+  // The index strfile header structure
+  struct HDR_t {
+    union {
+      struct {
+        unsigned long str_version;
+        unsigned long str_numstr;
+        unsigned long str_longlen;
+        unsigned long str_shortlen;
+        unsigned long str_flags;
+        char str_delim;
+      };
+      uint8_t buf[24] = {'\0'};
+    };
+  };
+  // The index strfile pointer structure
+  struct PTR_t {
+    union {
+      struct {
+        unsigned long offset;
+      };
+      uint8_t buf[4] = {'\0'};
+    };
+  };
+  HDR_t hdr;
+  PTR_t ptr;
 
+  // Create the index file path
+  strcpy(filePath, "/fortunes/");
+  strcat(filePath, cookies);
+  strcat(filePath, ".dat");
+  // Read the index file
+  File file = FSYS.open(filePath, FILE_READ);
+  // Read the header
+  file.readBytes((char*)&hdr.buf[0], sizeof(hdr.buf));
+  // Convert from BE to LE
+  hdr.str_version = __builtin_bswap32(hdr.str_version);
+  hdr.str_numstr = __builtin_bswap32(hdr.str_numstr);
+  hdr.str_longlen = __builtin_bswap32(hdr.str_longlen);
+  hdr.str_shortlen = __builtin_bswap32(hdr.str_shortlen);
+  hdr.str_flags = __builtin_bswap32(hdr.str_flags);
+  // Select one offset
+  file.seek(random(hdr.str_numstr) * 4 + 24);
+  file.readBytes((char*)&ptr.buf[0], sizeof(ptr.buf));
+  ptr.offset = __builtin_bswap32(ptr.offset);
+  // Close the index file
+  file.close();
+
+  // The cookies file has no .dat extension
+  filePath[strlen(filePath) - 4] = '\0';
+  // Read the cookies file
+  file = FSYS.open(filePath, FILE_READ);
+  if (file.isFile()) {
+    file.seek(ptr.offset);
+    while (len >= 0) {
+      // Read one line from file
+      len = readLine(&file, buf, 512, true);
+      // Break on delimiter
+      if (buf[0] == hdr.str_delim) break;
+      // Send the line
+      client->println(buf);
+      outSize += len;
+    }
+  }
+  file.close();
+  // Return the lenght of the cookies
+  return outSize;
+}
 
 // Set time via NTP, as required for x.509 validation
 // TODO Need a timeout
@@ -974,6 +1044,18 @@ int sendStatusPage(Stream *client) {
   return outSize;
 }
 
+size_t sendFortune(Stream *client, proto_t proto, const char* cookies) {
+  size_t outSize = 0;
+  logErrCode = sendHeader(client, proto, ST_OK, "text/gemini");
+  outSize += client->printf("# A cookie from the %s jar\r\n\r\n", cookies);
+  // Read one fortune
+  outSize += client->print("```\r\n");
+  outSize += getFortune(client, cookies);
+  outSize += client->print("```\r\n");
+  // Return the file size
+  return outSize;
+}
+
 // Receive a file using the titan:// schema and write it to filesystem
 int receiveFile(Stream *client, char *pHost, char *pPath, char *plData, int plSize, int bufSize) {
   File file;    // The file handler to test the path
@@ -1263,6 +1345,13 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
   else if (strcmp(pPath, "/status") == 0 and proto == GEMINI) {
     // Send the server status page
     outSize = sendStatusPage(client);
+  }
+  else if (strncmp(pPath, "/fortune", 8) == 0) {
+    // Send one fortune
+    if (pPath[8] == '/')
+      outSize = sendFortune(client, proto, &pPath[9]);
+    else
+      outSize = sendFortune(client, proto, "startrek");
   }
   else if (strcmp(pPath, "/input") == 0 and proto == GEMINI) {
     if (auth) {
