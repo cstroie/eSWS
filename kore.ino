@@ -26,7 +26,7 @@
 
 // Software name and version
 #define PROGNAME "kore"
-#define PROGVERS "0.7"
+#define PROGVERS "0.8"
 
 // Main configuration file
 #define CFG_FILE  "/kore.cfg"
@@ -35,6 +35,9 @@
 #define SSL_CA    "/ssl/ca-cert.pem"
 #define SSL_CERT  "/ssl/srv-cert.pem"
 #define SSL_KEY   "/ssl/srv-key.pem"
+
+// Fortunes directory
+#define FORT_DIR  "/fortunes/"
 
 // LED configuration
 #define LEDinv (true)
@@ -466,20 +469,40 @@ bool loadConfig() {
   return result;
 }
 
-size_t getFortune(Stream *client, const char *cookies) {
+// ROT13 is a simple letter substitution cipher that replaces a letter
+// with the letter 13 letters after or before it in the alphabet.
+void rot13(char* text) {
+  char *c = text;
+  while (*c != '\0') {
+    // Only increment alphabet characters
+    if ((*c >= 97 && *c <= 122) || (*c >= 65 && *c <= 90)) {
+      if (*c > 109 || (*c >= 78 && *c <= 90))
+        // Characters that wrap around to the start of the alphabet
+        *c -= 13;
+      else
+        // Characters that can be safely incremented
+        *c += 13;
+    }
+    c++;
+  }
+}
+
+size_t getFortune(Stream *client, proto_t proto, const char *cookies) {
   char filePath[80];
   size_t len = 1024;
   size_t outSize = 0;
+  bool cont = false;
+  char lstChr = ' ';
   // The index strfile header structure
   struct HDR_t {
     union {
       struct {
-        unsigned long str_version;
-        unsigned long str_numstr;
-        unsigned long str_longlen;
-        unsigned long str_shortlen;
-        unsigned long str_flags;
-        char str_delim;
+        unsigned long version;
+        unsigned long numstr;
+        unsigned long longlen;
+        unsigned long shortlen;
+        unsigned long flags;
+        char delim;
       };
       uint8_t buf[24] = {'\0'};
     };
@@ -497,7 +520,7 @@ size_t getFortune(Stream *client, const char *cookies) {
   PTR_t ptr;
 
   // Create the index file path
-  strcpy(filePath, "/fortunes/");
+  strcpy(filePath, FORT_DIR);
   strcat(filePath, cookies);
   strcat(filePath, ".dat");
   // Read the index file
@@ -505,15 +528,15 @@ size_t getFortune(Stream *client, const char *cookies) {
   // Read the header
   file.readBytes((char*)&hdr.buf[0], sizeof(hdr.buf));
   // Convert from BE to LE
-  hdr.str_version = __builtin_bswap32(hdr.str_version);
-  hdr.str_numstr = __builtin_bswap32(hdr.str_numstr);
-  hdr.str_longlen = __builtin_bswap32(hdr.str_longlen);
-  hdr.str_shortlen = __builtin_bswap32(hdr.str_shortlen);
-  hdr.str_flags = __builtin_bswap32(hdr.str_flags);
+  hdr.version  = __builtin_bswap32(hdr.version);
+  hdr.numstr   = __builtin_bswap32(hdr.numstr);
+  hdr.longlen  = __builtin_bswap32(hdr.longlen);
+  hdr.shortlen = __builtin_bswap32(hdr.shortlen);
+  hdr.flags    = __builtin_bswap32(hdr.flags);
   // Select one offset
-  file.seek(random(hdr.str_numstr) * 4 + 24);
+  file.seek(random(hdr.numstr) * 4 + 24);
   file.readBytes((char*)&ptr.buf[0], sizeof(ptr.buf));
-  ptr.offset = __builtin_bswap32(ptr.offset);
+  ptr.offset   = __builtin_bswap32(ptr.offset);
   // Close the index file
   file.close();
 
@@ -526,12 +549,40 @@ size_t getFortune(Stream *client, const char *cookies) {
     while (len >= 0) {
       // Read one line from file
       len = readLine(&file, buf, 512, true);
+      // Break on read error
+      if (len == -2) break;
       // Break on delimiter
-      if (buf[0] == hdr.str_delim) break;
+      if (buf[0] == hdr.delim and buf[1] == '\0') break;
+      // Incomplete line
+      if (len == -1) buf[512] = '\0';
+      // ROT13
+      if (hdr.flags and 0x04)
+        rot13(buf);
+
+      // FIXME Proper support for gopher
+
+      // Check previous line continuation
+      if (!cont or buf[0] <'a' or buf[0] > 'z')
+        outSize += client->print("\r\n> ");
+      else if (lstChr != ' ')
+        outSize += client->print(" ");
+      // Check next line continuation
+      lstChr = buf[len - 1];
+      if (len > 0 and
+          ((lstChr >= 'a' and lstChr <= 'z') or
+           lstChr == ' ' or
+           lstChr == ',' or
+           lstChr == ';' or
+           lstChr == '-'
+          ))
+        cont = true;
+      else
+        cont = false;
       // Send the line
-      client->println(buf);
-      outSize += len;
+      outSize += client->print(buf);
     }
+    // Send one new line
+    outSize += client->print("\r\n");
   }
   file.close();
   // Return the lenght of the cookies
@@ -1047,11 +1098,20 @@ int sendStatusPage(Stream *client) {
 size_t sendFortune(Stream *client, proto_t proto, const char* cookies) {
   size_t outSize = 0;
   logErrCode = sendHeader(client, proto, ST_OK, "text/gemini");
-  outSize += client->printf("# A cookie from the %s jar\r\n\r\n", cookies);
-  // Read one fortune
-  outSize += client->print("```\r\n");
-  outSize += getFortune(client, cookies);
-  outSize += client->print("```\r\n");
+  switch (proto) {
+    case GOPHER:
+      outSize += client->printf("iA cookie from the %s jar\t\tnull\t70\r\n", cookies);
+      outSize += client->print("i\t\tnull\t70\r\n");
+      break;
+    case GEMINI:
+    case SPARTAN:
+    case HTTP:
+      outSize += client->printf("# A cookie from the %s jar\r\n", cookies);
+      // Read one fortune
+      break;
+  }
+  // Senf the fortune
+  outSize += getFortune(client, proto, cookies);
   // Return the file size
   return outSize;
 }
@@ -1346,12 +1406,56 @@ int sendFile(Stream *client, proto_t proto, char *pHost, char *pPath, char *pQue
     // Send the server status page
     outSize = sendStatusPage(client);
   }
-  else if (strncmp(pPath, "/fortune", 8) == 0) {
+  else if (strncmp(pPath, "/fortunes", 9) == 0) {
     // Send one fortune
-    if (pPath[8] == '/')
-      outSize = sendFortune(client, proto, &pPath[9]);
-    else
+    if (*pQuery)
+      outSize = sendFortune(client, proto, pQuery);
+    else if (pPath[9] == '/')
+      outSize = sendFortune(client, proto, &pPath[10]);
+    else {
       outSize = sendFortune(client, proto, "startrek");
+      // Send the list of cookie jars
+      switch (proto) {
+        case GOPHER:
+          outSize += client->print("i\t\tnull\t70\r\n");
+          outSize += client->printf("iSee more\t\tnull\t70\r\n", pPath);
+          outSize += client->print("i\t\tnull\t70\r\n");
+          break;
+        case GEMINI:
+        case SPARTAN:
+        case HTTP:
+          outSize += client->print("\r\n## See more\r\n");
+          break;
+      }
+      // Iterate over *.dat files
+      File dir = FSYS.open(FORT_DIR, "r");
+      while (File entry = dir.openNextFile()) {
+        if (entry.isFile()) {
+          // Copy the file name
+          char fname[80];
+          strcpy(fname, entry.name());
+          // Check the extension
+          if (strstr(&fname[strlen(fname) - 4], ".dat")) {
+            // Remove the extension
+            fname[strlen(fname) - 4] = '\0';
+            // Send the line
+            switch (proto) {
+              case GOPHER:
+                outSize += client->printf("%c%s\t/fortunes/%s\t%s\t%d\r\n",
+                                          '0', fname, fname, cfgFQDN, 70);
+                break;
+              case GEMINI:
+              case SPARTAN:
+              case HTTP:
+                outSize += client->printf("=> /fortunes?%s  %s\r\n", fname, fname);
+                break;
+            }
+          }
+        }
+        // Close the file
+        entry.close();
+      }
+    }
   }
   else if (strcmp(pPath, "/input") == 0 and proto == GEMINI) {
     if (auth) {
@@ -2051,9 +2155,9 @@ void loop() {
 #ifdef USE_UPNP
       // UPnP port mappings
       Serial.println(F("NET: Adding UPnP port mappings ... "));
-      tinyUPnP->addPortMappingConfig(WiFi.localIP(), 1965, RULE_PROTOCOL_TCP, 36000, "eSWS Gemini");
-      tinyUPnP->addPortMappingConfig(WiFi.localIP(), 300, RULE_PROTOCOL_TCP, 36000, "eSWS Spartan");
-      tinyUPnP->addPortMappingConfig(WiFi.localIP(), 70, RULE_PROTOCOL_TCP, 36000, "eSWS Gopher");
+      tinyUPnP->addPortMappingConfig(WiFi.localIP(), 1965, RULE_PROTOCOL_TCP, 36000, "kore Gemini");
+      tinyUPnP->addPortMappingConfig(WiFi.localIP(), 300, RULE_PROTOCOL_TCP, 36000, "kore Spartan");
+      tinyUPnP->addPortMappingConfig(WiFi.localIP(), 70, RULE_PROTOCOL_TCP, 36000, "kore Gopher");
       // Commit the port mappings to the IGD
       portMappingResult portMappingAdded = tinyUPnP->commitPortMappings();
 #endif
